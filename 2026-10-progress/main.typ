@@ -64,7 +64,7 @@ upstream KA path is the one that can be contributed back.
   [`rhs!` from hand-written kernels], [#ok], [raised kernels run on a real TPU, E2],
   [`rhs!` from upstream Trixi's KA kernels], [#no], [4 of 20 kernels raise in every case; volume terms do not (E4)],
   [whole explicit time loop, fixed `dt`, in *one* XLA program], [#ok], [`@trace for` over 5-stage RK, E2],
-  [CFL-adaptive `dt`], [#warn], [should work (`@trace while`, in-graph reduction); not tested],
+  [CFL-adaptive `dt`], [#ok], [`@trace while` with in-graph CFL reduction, ≈ 5% overhead (E7)],
   [callbacks with I/O], [host], [compile "advance k steps", do I/O between calls],
   [AMR, p4est mesh generation], [#no], [XLA needs static shapes; p4est is a C library on the host],
 )
@@ -233,28 +233,127 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 - *As array operations the same solver is 57× faster* — and beats the 3070's native CUDA at
   4M DOFs. Results: kernels bitwise equal to the CPU; array form $4 times 10^(-6)$.
 
+== E6: gathers on the TPU, block by block
+
+64 MiB of Float32 split into blocks of $M$ numbers, read once through an index array:
+
+#table(
+  columns: (1.7fr, auto, auto, auto, auto, auto),
+  [*GB/s (copy: 365)*], [$M = 1$], [$4$], [$16$], [$64$], [$256$],
+  [slices (structured neighbour)], [164], [372], [375], [373], [360],
+  [block gather `X[:, idx]`], [1.0], [5.2], [19], [41], [*234*],
+  [block scatter], [1.2], [0.6], [9], [35], [113],
+  [scalar gather (what raised kernels do)], [0.6], [0.3], [0.3], [0.3], [0.3],
+  [A100: block gather, random indices], [130], [363], [577], [678], [671],
+)
+
+- *The TPU pays per index* (≈ 120 M indices/s, random or regular alike): only ≈ 1 KiB blocks
+  come close to copy speed. Slices cost nothing — structured meshes are cheap.
+- Unstructured meshes must gather *whole elements* (3D, $N = 3$: 320 numbers), not faces or nodes.
+
+== E7: 2D Euler written as array operations
+
+- Same discretization as Trixi (TreeMesh / Cartesian P4est): LGL $N = 3$, LLF, weak form *or*
+  flux differencing (Kennedy–Gruber), convergence test with source terms, periodic.
+- Volume term: weak form = one `dot_general` per direction; flux differencing = two-point fluxes
+  of all node pairs by broadcasting, contracted with $D_"split"$. Neighbours: *slices*
+  (structured) or *one block gather* of whole faces (unstructured).
+- *Matches Trixi's `rhs!` to $10^(-12)$ in Float64* — all four variants, on the CPU, the TPU
+  and an A100.
+- Whole RK time loop in one XLA program, also with a CFL-adaptive `dt` computed inside it
+  (`@trace while`, ≈ 5% overhead). Compile: ≈ 75 s the first time (Reactant warm-up), then
+  3–13 s per configuration.
+
+== E7: TPU v5e vs A100
+
+`rhs!` in Float32, $2^10 times 2^10$ elements (16.8 M DOFs):
+
+#table(
+  columns: (1.9fr, auto, auto),
+  [*Implementation*], [*weak form*], [*flux differencing*],
+  [TPU v5e, array form, slices], [11.1 ms], [13.7 ms],
+  [TPU v5e, array form, face gathers], [41.4 ms], [43.0 ms],
+  [A100, same array code via Reactant], [*5.8 ms*], [*3.8 ms*],
+  [A100, upstream Trixi CUDA kernels (P4est)], [16.4 ms], [13.7 ms],
+)
+
+- On the TPU the array form is *as fast as Trixi's own CUDA kernels on an A100*; on the A100
+  it is 2–3.6× faster still (P4est handles curved meshes — not quite like for like).
+- Per DOF and euro at spot prices, v5e (€0.49/h) ≈ A100 (\$1.39/h) for the array code;
+  both ≈ 3–4× cheaper than today's Trixi kernels. Gathers: 3.7× slower on the TPU, free on the A100.
+
+== E9: 3D — where Trixi's GPU kernels shine
+
+`rhs!` in Float32, $64^3$ elements (16.8 M DOFs), same validation against Trixi ($10^(-11)$):
+
+#table(
+  columns: (1.9fr, auto, auto),
+  [*Implementation*], [*weak form*], [*flux differencing*],
+  [TPU v5e, array form], [37.0 ms], [49.2 ms],
+  [A100, same array code via Reactant], [*12.9 ms*], [9.2 ms],
+  [A100, upstream Trixi CUDA kernels (P4est)], [34.8 ms], [*5.2 ms*],
+)
+
+- Trixi's dedicated 3D shared-memory flux-differencing kernel is 1.8× faster than the array
+  form on the A100 and *9.4× faster than the TPU* (≈ 3.6× cheaper per DOF even at spot prices).
+- The TPU falls further behind in 3D: 3–5× slower than the A100 running the same code.
+- Compile times stay modest: largest 3D program 17 s (`rhs!`) / 68 s (whole time loop).
+
+== E7: precision on the TPU
+
+$L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
+
+#table(
+  columns: (1.6fr, auto, auto, auto, auto, auto),
+  [*$2^L times 2^L$ elements, $L$ =*], [2], [3], [4], [6], [8],
+  [Float32, `dot_general` DEFAULT (bf16)], [5.5e-3], [1.0e-2], [1.4e-2], [2.2e-2], [3.1e-2],
+  [Float32, HIGH (bf16 × 3)], [8.4e-4], [5.6e-5], [3.3e-5], [2.1e-4], [3.0e-4],
+  [Float32, HIGHEST], [8.4e-4], [5.1e-5], [*2.6e-6*], [3.7e-6], [1.1e-5],
+  [Float64 (emulated, 49× slower)], [8.4e-4], [5.1e-5], [1.5e-6], [5.7e-9], [*2.8e-11*],
+)
+
+- *`dot_general` must run at HIGHEST* (only 8–17% slower): bf16 never converges.
+- *Float32 stops converging at ≈ $3 times 10^(-6)$* (16×16 elements) and gets worse with
+  refinement; flux differencing behaves the same. Float64 keeps order 4 down to $10^(-11)$.
+
 = Precision
 
 == Do we need Float64?
 
-- *TPUs have no native Float64*: on the v5e, Float64 runs emulated — 2× slower in E2, 170× in
-  a compute-bound reduction (E1), and no longer bitwise reproducible ($8 times 10^(-14)$).
+- *TPUs have no native Float64*: emulated on the v5e — 48× (weak form) and 103× (flux
+  differencing) slower in E7, 170× in a compute-bound reduction (E1). On an A100 the same
+  code pays only 1.6–2.3× for Float64.
 - *Consumer GPUs*: FP64 at 1/64 of FP32 (17× slower measured on the 3070).
 - *Upstream Trixi already supports Float32*: `semidiscretize(...; real_type = Float32)`;
   the CUDA/AMDGPU tests run Float32 with Float32 tolerances.
-- *TPU pitfall*: XLA computes Float32 matrix products in bf16 by default. Raised DG kernels
-  are likely to contain `dot_general`, so Reactant must be told to use full precision:
-  `Reactant.with_config(; dot_general_precision = PrecisionConfig.HIGHEST)`.
+- *TPU pitfall*: XLA computes Float32 matrix products in bf16 by default, which destroys
+  convergence (E7); always `Reactant.with_config(; dot_general_precision = PrecisionConfig.HIGHEST)`.
 
-== Float32: what to check before relying on it
+== Float32: what we found
 
-- In E2 the Float32 *rhs* error grows with resolution (relative $10^(-2)$ at 16k elements,
-  $0.58$ at 1M) because $dif u slash dif t = J^(-1) (dots)$ is a difference of nearly equal terms — yet the solution after 100 steps
-  is still accurate to $10^(-5)$.
-- Planned check: experimental order of convergence in Float32 vs Float64 on standard
-  convergence tests, plus long-time runs, entropy-conservative fluxes (log means) and
-  steady-state problems.
-- *Question for you*: are the target applications fine with Float32?
+- *Accuracy floor*: with Float32 the $L^2$ error of the 2D Euler convergence test bottoms out
+  at ≈ $3 times 10^(-6)$ and grows again under refinement (more steps, more cancellation in
+  $J^(-1) (dots)$) — fine for engineering accuracy, not for convergence studies.
+- Single `rhs!` evaluations look worse ($10^(-5)$ – $10^(-4)$ relative vs Float64) than the
+  solution, as already seen in E2.
+- Still to check: long-time runs, entropy-conservative fluxes (log means), steady states.
+- *Question for you*: are the target applications fine with errors around $10^(-6)$?
+
+= Summary
+
+== Assessment so far
+
+- *Trixi's KA kernels*: all 20 run through Reactant on a GPU unchanged, but only 4 raise in
+  every case — today there is no TPU path by raising Trixi's kernels (E4).
+- *TPUs want array operations*: an indirect access costs ≈ 8 ns per index (E5, E6). Written as
+  array code, 2D DG on one v5e matches Trixi's CUDA kernels on an A100 (E7); 3D does not (E9).
+- *Precision*: Float32 caps the error at ≈ $3 times 10^(-6)$ on this test (CPU and TPU alike);
+  Float64 is 48–103× slower on the TPU; `dot_general` must run at HIGHEST.
+- *Cost*: at spot prices a v5e ≈ an A100 for the 2D array code — but the A100 also runs the
+  existing Trixi code and fast Float64.
+- *My reading*: TPUs are worth it only for Float32-tolerant runs on structured or
+  element-blocked meshes with an array implementation; for Trixi in general, GPUs remain the
+  better target.
 
 = Next steps
 
@@ -262,12 +361,12 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 
 + *Report the Reactant issues* with minimal reproducers: `Type` kernel arguments, the NaN
   miscompile, the `AffineCFGPass` segfault, unraised loops (`scf.while`) and `sinpi`.
-+ *Array formulation for the TPU*: prototype the P4est 2D `rhs!` as array operations (volume
-  term as one `dot_general`, interfaces via precomputed index maps on whole faces) in a
-  `TrixiReactantExt` package extension, then measure on the v5e against E5's 1D numbers.
++ *Array formulation beyond Cartesian*: curved P4est meshes (metric terms) and unstructured
+  connectivity via *element-sized* gathers (E6), then 3D; as a `TrixiReactantExt` package
+  extension that swaps in array implementations of the volume and surface terms.
++ Multi-chip runs (v5e-4/8, Reactant sharding) once single-chip numbers are settled.
 + Report the Trixi issues (`@private` for KA's CPU backend, basis type constraints, symbolic
-  `node_indices`) on \#2822; cover mortars / non-conforming meshes, not tested in E4.
-+ Float32 vs Float64 convergence study.
+  `node_indices`) on \#2822; mortars / non-conforming meshes are still untested.
 
 == Questions
 
