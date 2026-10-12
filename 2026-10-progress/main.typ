@@ -114,12 +114,15 @@ upstream KA path is the one that can be contributed back.
 #table(
   columns: (1fr, auto, 1.3fr),
   [*Level*], [*Status*], [*Evidence / reason*],
+  table.cell(colspan: 3, fill: luma(235))[*Measured*],
   [`rhs!` from hand-written kernels], [#ok], [raised kernels run on a real TPU, E2],
   [`rhs!` from upstream Trixi's KA kernels], [#no], [4 of 20 kernels raise in every case; volume terms do not (E4)],
+  [`rhs!` written as array operations], [#ok], [1D, 2D and 3D DG, E5, E7, E9],
   [whole explicit time loop, fixed `dt`, in *one* XLA program], [#ok], [`@trace for` over 5-stage RK, E2],
   [CFL-adaptive `dt`], [#ok], [`@trace while` with in-graph CFL reduction, ≈ 5% overhead (E7)],
-  [callbacks with I/O], [CPU], [compile "advance k steps", do I/O on the CPU between calls],
-  [AMR, p4est mesh generation], [#no], [XLA needs static shapes; p4est is a C library running on the CPU],
+  table.cell(colspan: 3, fill: luma(235))[*Not tested — expected from how XLA works*],
+  [callbacks with I/O], [on the CPU], [compile "advance k steps", do I/O on the CPU between calls],
+  [AMR, p4est mesh generation], [#no], [XLA needs fixed array sizes; p4est is a C library running on the CPU],
 )
 
 TrixiCUDA currently stops at the `rhs!` level; with Reactant the time loop itself can be compiled.
@@ -197,21 +200,27 @@ All working modes reproduce the same-precision CPU reference *bit for bit* after
 
 == E3: upstream Trixi through Reactant — blockers
 
-Target: `p4est_2d_dgsem/elixir_advection_basic.jl`, `Trixi.rhs_hyperbolic!` under `@compile`. Not reached yet.
+Target: `p4est_2d_dgsem/elixir_advection_basic.jl`, `Trixi.rhs_hyperbolic!` under `@compile`.
 
 #table(
-  columns: (1.2fr, 1fr),
-  [*Blocker*], [*Workaround (method overrides only)*],
-  [`wrap_array` uses `unsafe_wrap(pointer(u_ode))`], [return a `ReshapedArray` (Reactant writes back)],
-  [containers build views with `unsafe_wrap_or_alloc` (pointers)], [reshaped device copy (no AMR)],
-  [boundary/interface data stored as arrays of `Symbol` tuples], [keep on the CPU / encode as `Int8`],
-  [kernels branch on `node_indices` with `===` on symbols], [integer index type + methods for the 5 index helpers],
+  columns: (1.2fr, 1fr, auto),
+  [*Blocker, in the order met*], [*Workaround (added methods only)*], [*In E3*],
+  [`wrap_array` uses `unsafe_wrap(pointer(u_ode))`], [return a `ReshapedArray` (Reactant writes back)], [#ok],
+  [containers build views with `unsafe_wrap_or_alloc` (pointers)], [reshaped device copy (no AMR)], [#ok],
+  [boundary/interface data stored as arrays of `Symbol` tuples], [keep them on the CPU], [#ok],
+  [kernels branch on `node_indices` with `===` on symbols], [encode as `Int8` + methods for the 5 index helpers], [stopped here],
 )
 
-In short: Trixi reaches its arrays through raw memory addresses (pointers) and stores some mesh
-information as Julia `Symbol`s (names such as `:i_forward`); an XLA array has no addresses and
-holds only numbers. On CUDA the last point works only because a `CuArray` can store pointers to
-symbols. No Trixi source was changed — all workarounds are added methods.
+*Status*: E3 stopped at the last blocker, so the full `rhs!` never compiled. Rather than fix it
+inside the whole solver, E4 converts the arguments of each kernel separately (with `Int8` codes
+for `node_indices`) and tests every kernel on its own; E3 was not resumed.
+
+#small[
+  Trixi reaches its arrays through raw memory addresses (pointers) and stores some mesh
+  information as Julia `Symbol`s (names such as `:i_forward`); an XLA array has no addresses and
+  holds only numbers. On CUDA the last blocker is no problem because a `CuArray` can store
+  pointers to symbols.
+]
 
 == E4: inventory of Trixi's 20 KA kernels — method
 
@@ -381,6 +390,8 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 - Trixi's dedicated 3D shared-memory flux-differencing kernel is 1.8× faster than the array
   form on the A100 and *9.4× faster than the TPU* (≈ 3.6× cheaper per DOF at cloud prices).
 - The TPU falls further behind in 3D: 3–5× slower than the A100 running the same code.
+  *Why is open — I have not profiled it.* A guess: the many dimensions of length 4 are padded to
+  the TPU's 128-wide memory tiles.
 - Compile times stay modest: largest 3D program 17 s (`rhs!`) / 68 s (whole time loop).
 
 == E7: precision on the TPU
@@ -428,45 +439,61 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
 - Single `rhs!` evaluations look worse ($10^(-5)$ – $10^(-4)$ relative vs Float64) than the
   solution, as already seen in E2.
 - Still to check: long-time runs, entropy-conservative fluxes (log means), steady states.
-- *Question for you*: are the target applications fine with errors around $10^(-6)$?
 
 = Summary
 
 == Assessment so far
 
-- *Trixi's KA kernels*: all 20 run through Reactant on a GPU unchanged, but only 4 raise in
-  every case — today there is no TPU path by raising Trixi's kernels (E4).
-- *TPUs want array operations*: an indirect access costs ≈ 8 ns per index (E5, E6). Written as
-  array code, 2D DG on one v5e matches Trixi's CUDA kernels on an A100 (E7); 3D does not (E9).
-- *Precision*: Float32 caps the error at ≈ $3 times 10^(-6)$ on this test (CPU and TPU alike);
-  Float64 is 48–103× slower on the TPU; `dot_general` must run at HIGHEST.
-- *Cost*: at cloud prices a v5e ≈ an A100 for the 2D array code — but the A100 also runs the
-  existing Trixi code and fast Float64.
-- *My reading*: TPUs are worth it only for Float32-tolerant runs on structured or
-  element-blocked meshes with an array implementation; for Trixi in general, GPUs remain the
-  better target.
+#[
+  #set text(size: 17pt)
+  - *Trixi's KA kernels*: all 20 run through Reactant on a GPU unchanged, but only 4 raise in
+    every case — today there is no TPU path by raising Trixi's kernels (E4).
+  - *TPUs want array operations*: an indirect access costs ≈ 8 ns per index (E5, E6). Written as
+    array code, 2D DG on one v5e matches Trixi's CUDA kernels on an A100 (E7); 3D does not (E9).
+  - *Precision*: Float32 caps the error at ≈ $3 times 10^(-6)$ on this test (CPU and TPU alike);
+    Float64 is 48–103× slower on the TPU; `dot_general` must run at HIGHEST.
+  - *Cost*: at cloud prices a v5e ≈ an A100 for the 2D array code — but the A100 also runs the
+    existing Trixi code and fast Float64.
+  - *My reading*, judged by run time and cost per DOF: a TPU so far only *matches* a GPU, and
+    only for Float32-tolerant 2D runs on structured meshes, with a separate array implementation
+    (extra code to write and maintain). Unstructured meshes would need element-blocked gathers,
+    not yet tried in a solver. For Trixi in general GPUs remain the better target: the existing
+    kernels run there, Float64 is cheap, and 3D is faster.
+]
+
+#small[
+  *Element-blocked gathers*: on an unstructured mesh, neighbour data is fetched one whole element
+  per index (all its nodes and variables) instead of one face or node per index. A TPU gather
+  costs per index, so a block needs ≈ 1 KiB to come close to copy speed (E6): a 3D element with
+  $N = 3$ holds 320 numbers (1.25 KiB), a 2D element only 64 (41 vs 365 GB/s).
+]
 
 = Next steps
 
-== Plan
+== Plan, in this order
 
-+ *Report the Reactant issues* with minimal examples: type-valued kernel arguments, the raised
-  kernel with NaN results, the compiler crash, and what does not raise yet (data-dependent
-  loops, `sinpi`).
-+ *Array formulation beyond Cartesian meshes*: curved P4est meshes (metric terms) and
-  unstructured connectivity via *element-sized* gathers (E6), then 3D. Packaged as a Trixi
-  package extension (code that is loaded only together with Reactant) that swaps in array
-  versions of the volume and surface terms.
-+ Runs on 4–8 TPU chips (Reactant splits the arrays across chips) once single-chip numbers are
-  settled.
-+ Report the Trixi issues (HalfSweep kernels on KA's CPU backend, basis type constraints,
-  `Symbol`-valued `node_indices`) on Trixi's GPU-porting issue \#2822; mortars /
-  non-conforming meshes are still untested.
+#[
+  #set text(size: 17pt)
+  + *Report the issues found so far* with minimal examples. Reactant: type-valued kernel
+    arguments, the raised kernel with NaN results, the compiler crash, what does not raise yet
+    (data-dependent loops, `sinpi`). Trixi, on its GPU-porting issue \#2822: HalfSweep kernels on
+    KA's CPU backend, basis type constraints, `Symbol`-valued `node_indices`.
+  + *Curved 2D P4est meshes*: add the metric terms to the array implementation of E7; validate
+    against Trixi's `rhs!` and time it on the TPU.
+  + *Unstructured 2D connectivity*: neighbours through element-blocked gathers instead of slices.
+  + *Package extension*: move the array versions of the volume and surface terms into a Trixi
+    package extension (code that is loaded only together with Reactant).
+  + *3D*: curved and unstructured 3D meshes, extending E9.
+  + *Mortars / non-conforming meshes*: not covered by any experiment so far.
+]
 
-== Questions: scope
+Steps 2–6 assume the array route; the questions on the next slides decide how far they go.
 
-- Is *Float32* acceptable for the applications you have in mind?
-- Is the *upstream `P4estMesh` / KA path* the right scope (rather than `TreeMesh` / TrixiCUDA)?
+== Questions: precision and AD
+
+- *Float32* caps the error at ≈ $3 times 10^(-6)$ in the 2D Euler test (E7), while Float64 costs
+  48–103× on the TPU. What accuracy do the target applications need, and on which test cases
+  should I check Float32 (long-time runs, steady states, entropy-conservative fluxes)?
 - Should *automatic differentiation* be part of this project, and for what: Jacobian–vector
   products for implicit time stepping (Ariadne.jl / Theseus.jl do this for Trixi with Enzyme,
   CPU only), or gradients of an output with respect to parameters (adjoints)? Reactant can
@@ -475,13 +502,17 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
 
 == Questions: how to reach the TPU
 
-- *Shared memory*: Trixi's fastest 3D flux-differencing kernels use it, and Reactant cannot
-  raise them (no support for barriers yet); I have not worked on this. Options: (a) help add
-  barrier support to Reactant — compiler work; (b) target Trixi's variants without shared
-  memory — today blocked by a compiler crash and a loop that does not raise; (c) leave
-  raising and write array implementations (next question). On a TPU shared memory brings no
-  speed-up anyway, since XLA manages the on-chip memory. Which would you prefer?
-- Most of Trixi's kernels do not raise, and the ones that do are slow on the TPU because of
-  their index lookups, while the same solver written as array operations is fast. Would a
-  Reactant-specific *array implementation* of the volume and surface terms (package
-  extension) be acceptable?
+#[
+  #set text(size: 17pt)
+  - *Array implementation instead of raising?* Trixi's kernels mostly do not raise (E4), raised
+    kernels are slow on the TPU (E5), and array code is fast (E7). Is writing the volume and
+    surface terms as array operations the right direction — as an upstream package extension
+    (needs the Trixi maintainers' agreement) or as a separate prototype for the report?
+  - *Coverage*: structured meshes only, or also curved P4est meshes and unstructured
+    connectivity (element-blocked gathers)? 2D only, or 3D too?
+  - *Shared memory* (Trixi's fastest 3D flux-differencing kernels): Reactant cannot raise it (no
+    barrier support yet); I have not worked on this. Barrier support in Reactant, or Trixi's
+    variants without shared memory (now blocked by a compiler crash and a loop that does not
+    raise), would only make these kernels *run* on the TPU — raised kernels stay slow there
+    (E5), and shared memory gives a TPU no speed-up. Pursue this, or only the array route?
+]
