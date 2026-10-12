@@ -463,22 +463,25 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
   `Symbol`-valued `node_indices`) on Trixi's GPU-porting issue \#2822; mortars /
   non-conforming meshes are still untested.
 
-== Questions
+== Questions: scope
 
-#[
-  #set text(size: 17pt)
-  - Is *Float32* acceptable for the applications you have in mind?
-  - Is the *upstream `P4estMesh` / KA path* the right scope (rather than `TreeMesh` / TrixiCUDA)?
-  - *Shared memory*: Trixi's fastest 3D flux-differencing kernels use it, and Reactant cannot
-    raise them (no support for barriers yet); I have not worked on this. Options: (a) help add
-    barrier support to Reactant — compiler work; (b) target Trixi's variants without shared
-    memory — today blocked by a compiler crash and a loop that does not raise; (c) leave
-    raising and write array implementations (next question). On a TPU shared memory brings no
-    speed-up anyway, since XLA manages the on-chip memory. Which would you prefer?
-  - Most of Trixi's kernels do not raise, and the ones that do are slow on the TPU because of
-    their index lookups, while the same solver written as array operations is fast. Would a
-    Reactant-specific *array implementation* of the volume and surface terms (package
-    extension) be acceptable?
-  - Is *automatic differentiation* of interest for this project — Enzyme inside Reactant,
-    differentiating the compiled solver (as in Ariadne.jl)?
-]
+- Is *Float32* acceptable for the applications you have in mind?
+- Is the *upstream `P4estMesh` / KA path* the right scope (rather than `TreeMesh` / TrixiCUDA)?
+- Should *automatic differentiation* be part of this project, and for what: Jacobian–vector
+  products for implicit time stepping (Ariadne.jl / Theseus.jl do this for Trixi with Enzyme,
+  CPU only), or gradients of an output with respect to parameters (adjoints)? Reactant can
+  differentiate the compiled solver with Enzyme — array code directly, kernels only after
+  raising; not tried yet.
+
+== Questions: how to reach the TPU
+
+- *Shared memory*: Trixi's fastest 3D flux-differencing kernels use it, and Reactant cannot
+  raise them (no support for barriers yet); I have not worked on this. Options: (a) help add
+  barrier support to Reactant — compiler work; (b) target Trixi's variants without shared
+  memory — today blocked by a compiler crash and a loop that does not raise; (c) leave
+  raising and write array implementations (next question). On a TPU shared memory brings no
+  speed-up anyway, since XLA manages the on-chip memory. Which would you prefer?
+- Most of Trixi's kernels do not raise, and the ones that do are slow on the TPU because of
+  their index lookups, while the same solver written as array operations is fast. Would a
+  Reactant-specific *array implementation* of the volume and surface terms (package
+  extension) be acceptable?
