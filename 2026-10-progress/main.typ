@@ -21,6 +21,8 @@
 #let ok = text(fill: rgb("#2e7d32"), weight: "bold")[✓]
 #let no = text(fill: rgb("#c62828"), weight: "bold")[✗]
 #let warn = text(fill: rgb("#ef6c00"), weight: "bold")[!]
+// glossary / footnote text for terms from outside numerical analysis
+#let small(body) = block(above: 0.8em, text(size: 12.5pt, fill: luma(70), body))
 
 #title-slide()
 
@@ -34,13 +36,64 @@
 
 *Can Trixi.jl run on TPUs through Reactant.jl, and how far does "run" go?*
 
-- Reactant traces Julia code into MLIR / StableHLO and compiles it with XLA for CPU, GPU and TPU.
-- GPU kernels written with CUDA.jl or KernelAbstractions.jl (KA) can be *raised*: the
-  scalar per-thread kernel is rewritten as tensor operations in StableHLO.
-- On non-NVIDIA targets (TPU, Trainium) raising is mandatory and switched on automatically
-  (`src/compiler/Compiler.jl` in Reactant).
-- So "Trixi on TPU" means: every kernel that Trixi launches must be raisable, and every data
-  structure the kernels touch must be an XLA buffer of plain numbers.
+#[
+  #set text(size: 17pt)
+  - A *TPU* is Google's accelerator chip, built around a matrix-multiply unit. It has no thread
+    programming model like CUDA; the only way in is Google's compiler *XLA*, which takes programs
+    made of whole-array operations.
+  - *Reactant.jl* runs a Julia function once on placeholder ("traced") arrays, records each array
+    operation into such a program (in *StableHLO*) and has XLA compile it for CPU, GPU or TPU.
+  - Trixi's GPU code consists of *kernels* (KernelAbstractions.jl, "KA"): scalar code that each
+    GPU thread runs for one index. For a TPU, Reactant must *raise* them into array operations.
+]
+
+#small[
+  *XLA* (Accelerated Linear Algebra): the compiler behind TensorFlow and JAX; fuses array
+  operations into machine code; the only compiler for TPUs. \
+  *StableHLO* (HLO = High-Level Operations): XLA's input language — ≈ 100 whole-array operations
+  (`add`, `dot_general` = matrix product, `slice`, `gather`, `while`, …) on fixed-size arrays, no
+  threads, no pointers: one form of the computation that every XLA backend can optimize as a whole. \
+  *MLIR* (Multi-Level Intermediate Representation, LLVM project): a toolkit for such compiler
+  languages ("dialects") and the translations between them. StableHLO is one dialect; others
+  describe loops and GPU kernels — that is how Reactant turns a kernel into StableHLO.
+]
+
+== What "raising" a kernel means
+
+From Reactant's raising tutorial: a KA kernel and the output of `@code_hlo raise = true`.
+
+#grid(
+  columns: (1.1fr, 1fr),
+  gutter: 1em,
+  text(size: 15pt)[```julia
+  @kernel function square_kernel!(y, @Const(x))
+      i = @index(Global)        # thread i
+      @inbounds y[i] = x[i] * x[i]
+  end
+  # launched with 64 threads, x has 64 entries
+  ```],
+  text(size: 15pt)[```
+  func.func @main(%arg0: tensor<64xf64>)
+                     -> tensor<64xf64> {
+    %0 = stablehlo.multiply %arg0, %arg0
+                     : tensor<64xf64>
+    return %0 : tensor<64xf64>
+  }
+  ```],
+)
+
+#[
+  #set text(size: 17pt)
+  - 64 scalar multiplies (one per thread) become *one* vector multiply, which XLA fuses with the
+    rest of the program and runs on any device. Unraised, the program just calls the CUDA kernel
+    (NVIDIA GPUs only); on a TPU raising is switched on automatically.
+  - Neighbour access `y[i] = x[nbr[i]]` becomes a `stablehlo.gather`: one memory lookup per
+    index (E5, E6).
+  - Data-dependent loops, small local arrays and shared memory do not raise yet (E2, E4).
+]
+
+So "Trixi on a TPU" means: every kernel Trixi launches must raise, and every data structure the
+kernels touch must be an XLA array of plain numbers.
 
 == Two existing GPU lines in the Trixi ecosystem
 
@@ -49,7 +102,7 @@
   [], [*TrixiCUDA.jl*], [*Upstream Trixi.jl GPU path*],
   [Kernels], [hand-written CUDA.jl kernels re-implementing `rhs!`], [KA kernels inside Trixi (issue \#2822)],
   [Mesh], [`TreeMesh` 1D/2D/3D], [`P4estMesh` 2D/3D (`TreeMesh` "not planned")],
-  [On the GPU], [semidiscretization only; time stepping = OrdinaryDiffEq on `CuArray`; some callbacks copy to host], [rhs, stepsize and analysis callbacks; `storage_type`, `real_type` options],
+  [On the GPU], [semidiscretization only; time stepping = OrdinaryDiffEq on `CuArray`; some callbacks copy data to the CPU], [rhs, stepsize and analysis callbacks; `storage_type`, `real_type` options],
   [Trixi version], [pinned to 0.11 – 0.13.5], [current (0.17)],
 )
 
@@ -65,63 +118,80 @@ upstream KA path is the one that can be contributed back.
   [`rhs!` from upstream Trixi's KA kernels], [#no], [4 of 20 kernels raise in every case; volume terms do not (E4)],
   [whole explicit time loop, fixed `dt`, in *one* XLA program], [#ok], [`@trace for` over 5-stage RK, E2],
   [CFL-adaptive `dt`], [#ok], [`@trace while` with in-graph CFL reduction, ≈ 5% overhead (E7)],
-  [callbacks with I/O], [host], [compile "advance k steps", do I/O between calls],
-  [AMR, p4est mesh generation], [#no], [XLA needs static shapes; p4est is a C library on the host],
+  [callbacks with I/O], [CPU], [compile "advance k steps", do I/O on the CPU between calls],
+  [AMR, p4est mesh generation], [#no], [XLA needs static shapes; p4est is a C library running on the CPU],
 )
 
 TrixiCUDA currently stops at the `rhs!` level; with Reactant the time loop itself can be compiled.
 
 = Experiments
 
-== Setup
+== Experiments at a glance
 
-- RunPod RTX 3070 (8 GB, E1–E3) and RTX A4500 (20 GB, E4), both Ampere.
-- Julia 1.12, Reactant 0.2.291, CUDA.jl 6.2, Trixi 0.17.14 with
-  `backend = "kernelabstractions"`, `loop_vectorization = false`.
-- *TPU proxy*: Reactant's CPU backend with `raise = true` — the kernel must be raised, exactly
-  as on a TPU.
-- *Real TPU*: Cloud TPU v5e, 1 chip (`v5litepod-1`, europe-west4-b; spot €0.49/h, on-demand
-  €1.37/h when spot was preempted), running the `:tpu` variant of the image.
-- Scripts and notes: private repo `junyixu/TrixiReactant.jl`; reproducible GPU image
-  `ghcr.io/junyixu/trixidocker:latest` / `:tpu` (built by GitHub Actions).
+#show table: set text(size: 13pt)
+#table(
+  columns: (auto, 1.45fr, 1.2fr, auto),
+  [], [*What I ran*], [*Question it answers*], [*Hardware*],
+  [E1], [vector update and a sin/cos sum, Float32 and Float64, compiled by Reactant], [does Reactant use the device; what does Float64 cost?], [3070, TPU],
+  [E2], [1D DG solver (Burgers) as hand-written CUDA kernels, TrixiCUDA style], [can GPU kernels be raised and run on a TPU?], [3070, CPU, TPU],
+  [E3], [upstream Trixi's 2D P4est `rhs!` under Reactant], [does upstream Trixi compile unchanged?], [3070],
+  [E4], [each of the 20 KA kernels of upstream Trixi alone, raised and not, 16 test cases], [which Trixi kernels raise, and what blocks the rest?], [A4500],
+  [E5], [E2's solver in five variants (neighbours, data layout, array operations)], [why are raised kernels slow on the TPU?], [TPU],
+  [E6], [reads through index arrays, blocks of 1–256 numbers per index], [cost of indirect access, i.e. of unstructured meshes], [TPU, A100],
+  [E7], [2D Euler DG written as array operations, checked against Trixi's `rhs!`], [TPU speed vs Trixi on a GPU; Float32 convergence; adaptive `dt`], [TPU, A100, CPU],
+  [E8], [upstream Trixi's own CUDA kernels, P4est 2D and 3D], [GPU baseline for E7 and E9], [A100],
+  [E9], [3D version of E7], [does the picture hold in 3D?], [TPU, A100],
+)
+
+#small[
+  GPUs rented on RunPod (RTX 3070, RTX A4500, A100); TPU: Google Cloud TPU v5e, one chip
+  (`v5litepod-1`). Julia 1.12, Reactant 0.2.291, Trixi 0.17.14. "CPU, raised" = Reactant's CPU
+  backend with `raise = true`, a stand-in for the TPU (the kernel must be raised there too).
+]
 
 == E1: device check and FP32 vs FP64
 
 #table(
   columns: (auto, auto, auto, auto),
-  [*Backend*], [*Type*], [*axpy, $n = 2^24$*], [*sin/cos reduction*],
-  [GPU], [Float32], [0.66 ms (305 GB/s)], [0.31 ms],
-  [GPU], [Float64], [1.22 ms (331 GB/s)], [5.17 ms],
+  [*Backend*], [*Type*], [*$y <- a x + y$, $n = 2^24$*], [*$sum_i (sin x_i cos x_i + x_i^2)^2$*],
+  [RTX 3070], [Float32], [0.66 ms (305 GB/s)], [0.31 ms],
+  [RTX 3070], [Float64], [1.22 ms (331 GB/s)], [5.17 ms],
   [CPU], [Float32], [5.13 ms], [1.16 ms],
   [CPU], [Float64], [9.39 ms], [3.48 ms],
 )
 
-- Reactant drives the 3070 at ≈70 % of peak bandwidth with no CUDA.jl code.
-- Compute-bound work is *≈17× slower in Float64* on this consumer GPU.
+- Reactant drives the 3070 at ≈70 % of peak memory bandwidth from plain Julia array code.
+- Compute-bound work (the sin/cos sum) is *≈17× slower in Float64* on this consumer GPU.
 
 == E2: TrixiCUDA-style kernels through Reactant
 
 1D DGSEM, Burgers, LLF flux, periodic, $N = 3$, 5-stage low-storage RK, 100 steps. Kernels
-written in TrixiCUDA style (`@cuda`, `threadIdx`, neighbour index arrays).
+written in TrixiCUDA style (`@cuda`, one thread per node, neighbours from index arrays).
 
 #table(
   columns: (1.6fr, auto, auto, auto, auto),
-  [*Mode*], [*16k el. F32*], [*16k F64*], [*1M el. F32*], [*CPU backend*],
+  [*Mode (RTX 3070 unless noted)*], [*16k el. F32*], [*16k F64*], [*1M el. F32*], [*CPU backend*],
   [native CUDA.jl], [17.2 ms], [17.2 ms], [*256 ms*], [—],
-  [Reactant, kernels kept as PTX], [9.9 ms], [13.7 ms], [252 ms], [7006 ms],
-  [Reactant, *raised* to StableHLO], [*3.1 ms*], [12.5 ms], [413 ms], [*79 ms*],
-  [raised, shared memory + `sync_threads`], [#no], [#no], [#no], [#no],
+  [Reactant, kernels not raised (run as CUDA code)], [9.9 ms], [13.7 ms], [252 ms], [7006 ms],
+  [Reactant, kernels *raised* to StableHLO], [*3.1 ms*], [12.5 ms], [413 ms], [*79 ms*],
+  [raised, volume kernel using shared memory], [#no], [#no], [#no], [#no],
 )
 
 All working modes reproduce the same-precision CPU reference *bit for bit* after 100 steps.
 
+#small[
+  *Shared memory*: a small, fast memory shared by the threads of one GPU thread block; the
+  threads must wait at a barrier (`sync_threads`) before reading what the others wrote. Fast GPU
+  kernels use it to reuse data, e.g. the two-point fluxes of flux differencing.
+]
+
 == E2: what we learned
 
-- *Whole-loop compilation pays off for small problems*: one XLA program instead of a host loop
+- *Whole-loop compilation pays off for small problems*: one XLA program instead of a CPU loop
   launching ≈15 kernels per step → 5.5× faster than native CUDA.jl at 65k DOFs.
 - *Raised code is not free*: at 4M DOFs it is 1.6× slower than the hand-written kernels.
-- *Shared-memory kernels do not raise*: `failed to raise func` on GPU and CPU backends.
-  TrixiCUDA's optimized kernels and Trixi's 3D LDS volume kernels use this pattern.
+- *Shared-memory kernels do not raise* ("failed to raise func") on GPU and CPU backends.
+  TrixiCUDA's optimized kernels and Trixi's fastest 3D volume kernels use this pattern.
 - Without raising, the CPU backend still runs the CUDA kernel (lowered to CPU code), but
   ≈90× slower than the raised version — and a TPU has no such fallback.
 
@@ -134,24 +204,27 @@ Target: `p4est_2d_dgsem/elixir_advection_basic.jl`, `Trixi.rhs_hyperbolic!` unde
   [*Blocker*], [*Workaround (method overrides only)*],
   [`wrap_array` uses `unsafe_wrap(pointer(u_ode))`], [return a `ReshapedArray` (Reactant writes back)],
   [containers build views with `unsafe_wrap_or_alloc` (pointers)], [reshaped device copy (no AMR)],
-  [boundary/interface data stored as arrays of `Symbol` tuples], [keep on host / encode as `Int8`],
+  [boundary/interface data stored as arrays of `Symbol` tuples], [keep on the CPU / encode as `Int8`],
   [kernels branch on `node_indices` with `===` on symbols], [integer index type + methods for the 5 index helpers],
 )
 
-On CUDA the last point works only because a `CuArray` stores *pointers* to interned symbols;
-an XLA buffer cannot. No Trixi source was changed — all workarounds are added methods.
+In short: Trixi reaches its arrays through raw memory addresses (pointers) and stores some mesh
+information as Julia `Symbol`s (names such as `:i_forward`); an XLA array has no addresses and
+holds only numbers. On CUDA the last point works only because a `CuArray` can store pointers to
+symbols. No Trixi source was changed — all workarounds are added methods.
 
 == E4: inventory of Trixi's 20 KA kernels — method
 
 - 16 cases with the elixirs and kernel variants of `test_cuda_2d/3d.jl`: advection, Euler
   (weak form, flux differencing with every sweep variant), MHD; 2D and 3D; Float32.
-- A *recording KA backend* captures every launch of one `compute_coefficients` and one `rhs!`
-  on the CPU, with KA's CPU backend as reference (native CUDA where that fails).
-- Each kernel is *replayed alone* under `@compile raise = ...`; only its arguments are
-  converted, which sidesteps the E3 blockers.
-- Modes: through Reactant on the GPU *without* raising ("kept"), raised on the GPU, raised on
-  the CPU (TPU proxy). One process per case; a crashing kernel is skipped and the case rerun.
-- No Trixi source changed; harness workarounds on the next slides.
+- A *recording backend* for KA stores every kernel launch (kernel and arguments) while Trixi
+  computes the initial condition and one `rhs!` on the CPU; KA's CPU backend gives the
+  reference results (native CUDA where that fails).
+- Each kernel is then *replayed alone* through Reactant (`@compile raise = ...`); only its
+  arguments are converted, which sidesteps the E3 blockers.
+- Three modes: Reactant on the GPU *without* raising ("kept"), raised on the GPU, raised on the
+  CPU (stand-in for the TPU). Output compared with the reference.
+- No Trixi source changed; workarounds in the test harness on the next slides.
 
 == E4: results
 
@@ -170,29 +243,38 @@ an XLA buffer cannot. No Trixi source was changed — all workarounds are added 
 *Kept*: all 20 match the reference (rel. diff. ≤ $4 times 10^(-7)$, many bitwise).
 GPU and CPU raising agree everywhere.
 
+#small[
+  Blockers: `scf.while` = a loop whose length the raiser cannot determine (it handles simple
+  counted loops); stack `alloca` = a small local array inside the kernel; `sinpi` /
+  `__nv_sinpif` = NVIDIA's `sinpi` routine, not translated; segfault = the compiler itself
+  crashed; `@synchronize` = KA's barrier for shared memory. Sweep / turbo variants = Trixi's
+  alternative flux-differencing kernels.
+]
+
 == E4: what this means
 
 - *4 of 20 kernel definitions raise in every case, 2 in some, 14 never* — the 14 include
   every volume-term kernel, i.e. most of the arithmetic.
-- The surface kernels that do raise contain *20–42 gathers and up to 36 scatters* each, the
-  pattern that is slow on a TPU (E5).
-- Most blockers are compiler gaps, not Trixi design: loops the raiser does not recognise
-  (`scf.while`), small stack arrays, a missing `sinpi` lowering, a segfault, a miscompile.
-- Shared memory: Reactant does not lower barriers yet (its own test suite: "We don't yet auto
-  lower this via polygeist"). On a TPU it is pointless anyway — XLA manages on-chip memory —
-  so the global-memory variants are the ones to target.
+- The surface kernels that do raise contain *20–42 gathers and up to 36 scatters* each
+  (reads `x[idx[i]]` and writes `y[idx[i]] = ...` through index arrays) — the pattern that is
+  slow on a TPU (E5).
+- Most blockers are compiler gaps, not Trixi design: loops the raiser does not recognise,
+  small local arrays, a missing `sinpi`, a compiler crash, one wrong result.
+- Shared memory: Reactant cannot raise barriers yet (stated in its own test suite). On a TPU
+  shared memory is pointless anyway — XLA manages the on-chip memory itself — so Trixi's
+  variants without shared memory are the ones to target.
 
 == E4: bugs and gaps found (to report)
 
 #table(
   columns: (auto, 1fr, auto),
   [*Where*], [*Issue*], [*Workaround in E4*],
-  [Reactant], [kernel arguments of type `Type` rejected as non-isbits; every Trixi kernel receives `typeof(mesh)` (CUDA.jl passes it as a zero-size ghost)], [ghost via two methods],
+  [Reactant], [kernel arguments that are *types* are rejected; every Trixi kernel receives `typeof(mesh)` (CUDA.jl accepts it)], [pass it as an empty value],
   [Reactant], [raised 2D interface kernel returns NaN in 80/4096 outputs (bitwise correct without raising)], [—],
-  [Reactant], [segfault in `AffineCFGPass` (`OptimizeRem`) while raising 3 kernels], [skip kernel],
-  [Reactant], [not raised: `scf.while` loops, stack `alloca`, `__nv_sinpif`, barriers], [—],
-  [Trixi], [3D HalfSweep kernels fail on KA's *CPU* backend: locals across `@synchronize` without `@private`], [CUDA reference],
-  [Trixi], [basis/mortar types require `<: AbstractMatrix{RealT}`; traced arrays have eltype `TracedRNumber{RealT}`], [wrapper type],
+  [Reactant], [compiler crash (segfault in one optimisation pass, `AffineCFGPass`) while raising 3 kernels], [skip kernel],
+  [Reactant], [not raised yet: data-dependent loops, small local arrays, `sinpi`, barriers], [—],
+  [Trixi], [3D HalfSweep kernels fail on KA's *CPU* backend: variables used across a barrier are not declared `@private`], [CUDA reference],
+  [Trixi], [basis/mortar types require `AbstractMatrix{RealT}`; during tracing Reactant's arrays hold placeholders of type `TracedRNumber{RealT}`], [wrapper type],
   [Trixi], [`node_indices` stored as `Symbol` tuples, compared with `===` in kernels], [`Int8` codes],
 )
 
@@ -208,7 +290,7 @@ GPU and CPU raising agree everywhere.
 
 - The *CUDA.jl kernels run on the TPU after raising*; Float32 results match the CPU bit for bit.
 - Shared-memory kernel: raising fails, as on the other backends.
-- No `dot_general` in this program, so `dot_general_precision` makes no difference here.
+- No matrix products in this program, so the TPU's reduced-precision matrix unit plays no role here.
 - *But it is slow*: 25× slower than the 3070 at 4M DOFs. Cause: the scalar gathers of the
   raised kernels (E5, next slide).
 - E1 on the TPU: Float32 axpy at 426 GB/s (peak 819); Float64 runs but is emulated —
@@ -228,19 +310,21 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
   [RTX 3070: native CUDA.jl / raised (E2)], [17.2 / 3.1 ms], [256 / 413 ms], [—],
 )
 
-- *Not the layout*: XLA already stores the arrays element-major on the TPU (`{0,1:T(4,128)}`).
-- *The gathers*: raised kernels gather one scalar per element; run time follows their number.
+- *Not the data layout*: XLA already stores the arrays with the element index running fastest,
+  whichever order the Julia code uses.
+- *The gathers*: raised kernels look up one number per index; run time follows the number of gathers.
 - *As array operations the same solver is 57× faster* — and beats the 3070's native CUDA at
   4M DOFs. Results: kernels bitwise equal to the CPU; array form $4 times 10^(-6)$.
 
 == E6: gathers on the TPU, block by block
 
-64 MiB of Float32 split into blocks of $M$ numbers, read once through an index array:
+64 MiB of Float32 split into blocks of $M$ numbers, read once through an index array
+(`X[:, idx]`: column `idx[k]` of `X` for every $k$ — how an unstructured mesh finds its neighbours):
 
 #table(
   columns: (1.7fr, auto, auto, auto, auto, auto),
   [*GB/s (copy: 365)*], [$M = 1$], [$4$], [$16$], [$64$], [$256$],
-  [slices (structured neighbour)], [164], [372], [375], [373], [360],
+  [slices `X[:, 2:end]` (structured neighbour)], [164], [372], [375], [373], [360],
   [block gather `X[:, idx]`], [1.0], [5.2], [19], [41], [*234*],
   [block scatter], [1.2], [0.6], [9], [35], [113],
   [scalar gather (what raised kernels do)], [0.6], [0.3], [0.3], [0.3], [0.3],
@@ -255,9 +339,9 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 
 - Same discretization as Trixi (TreeMesh / Cartesian P4est): LGL $N = 3$, LLF, weak form *or*
   flux differencing (Kennedy–Gruber), convergence test with source terms, periodic.
-- Volume term: weak form = one `dot_general` per direction; flux differencing = two-point fluxes
-  of all node pairs by broadcasting, contracted with $D_"split"$. Neighbours: *slices*
-  (structured) or *one block gather* of whole faces (unstructured).
+- Volume term: weak form = one matrix product (`dot_general`) per direction; flux differencing =
+  two-point fluxes of all node pairs by broadcasting, contracted with $D_"split"$. Neighbours:
+  *slices* (structured) or *one block gather* of whole faces (unstructured).
 - *Matches Trixi's `rhs!` to $10^(-12)$ in Float64* — all four variants, on the CPU, the TPU
   and an A100.
 - Whole RK time loop in one XLA program, also with a CFL-adaptive `dt` computed inside it
@@ -279,8 +363,8 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 
 - On the TPU the array form is *as fast as Trixi's own CUDA kernels on an A100*; on the A100
   it is 2–3.6× faster still (P4est handles curved meshes — not quite like for like).
-- Per DOF and euro at spot prices, v5e (€0.49/h) ≈ A100 (\$1.39/h) for the array code;
-  both ≈ 3–4× cheaper than today's Trixi kernels. Gathers: 3.7× slower on the TPU, free on the A100.
+- Cost per DOF at cloud prices: v5e ≈ A100 for the array code, both ≈ 3× cheaper than Trixi's
+  current kernels. Face gathers: 3.7× slower on the TPU, free on the A100.
 
 == E9: 3D — where Trixi's GPU kernels shine
 
@@ -295,7 +379,7 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 )
 
 - Trixi's dedicated 3D shared-memory flux-differencing kernel is 1.8× faster than the array
-  form on the A100 and *9.4× faster than the TPU* (≈ 3.6× cheaper per DOF even at spot prices).
+  form on the A100 and *9.4× faster than the TPU* (≈ 3.6× cheaper per DOF at cloud prices).
 - The TPU falls further behind in 3D: 3–5× slower than the A100 running the same code.
 - Compile times stay modest: largest 3D program 17 s (`rhs!`) / 68 s (whole time loop).
 
@@ -316,6 +400,12 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
 - *Float32 stops converging at ≈ $3 times 10^(-6)$* (16×16 elements) and gets worse with
   refinement; flux differencing behaves the same. Float64 keeps order 4 down to $10^(-11)$.
 
+#small[
+  `dot_general` = XLA's matrix product. Its precision setting decides how the TPU's matrix unit
+  multiplies Float32: DEFAULT rounds the inputs to bfloat16 (bf16, 8 significant bits ≈ 2–3
+  digits), HIGH combines 3 bf16 products (≈ 16 bits), HIGHEST gives full Float32 accuracy.
+]
+
 = Precision
 
 == Do we need Float64?
@@ -326,8 +416,9 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
 - *Consumer GPUs*: FP64 at 1/64 of FP32 (17× slower measured on the 3070).
 - *Upstream Trixi already supports Float32*: `semidiscretize(...; real_type = Float32)`;
   the CUDA/AMDGPU tests run Float32 with Float32 tolerances.
-- *TPU pitfall*: XLA computes Float32 matrix products in bf16 by default, which destroys
-  convergence (E7); always `Reactant.with_config(; dot_general_precision = PrecisionConfig.HIGHEST)`.
+- *TPU pitfall*: XLA computes Float32 matrix products in bfloat16 (≈ 2–3 digits) by default,
+  which destroys convergence (E7); always
+  `Reactant.with_config(; dot_general_precision = PrecisionConfig.HIGHEST)`.
 
 == Float32: what we found
 
@@ -349,7 +440,7 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
   array code, 2D DG on one v5e matches Trixi's CUDA kernels on an A100 (E7); 3D does not (E9).
 - *Precision*: Float32 caps the error at ≈ $3 times 10^(-6)$ on this test (CPU and TPU alike);
   Float64 is 48–103× slower on the TPU; `dot_general` must run at HIGHEST.
-- *Cost*: at spot prices a v5e ≈ an A100 for the 2D array code — but the A100 also runs the
+- *Cost*: at cloud prices a v5e ≈ an A100 for the 2D array code — but the A100 also runs the
   existing Trixi code and fast Float64.
 - *My reading*: TPUs are worth it only for Float32-tolerant runs on structured or
   element-blocked meshes with an array implementation; for Trixi in general, GPUs remain the
@@ -359,34 +450,26 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
 
 == Plan
 
-+ *Report the Reactant issues* with minimal reproducers: `Type` kernel arguments, the NaN
-  miscompile, the `AffineCFGPass` segfault, unraised loops (`scf.while`) and `sinpi`.
-+ *Array formulation beyond Cartesian*: curved P4est meshes (metric terms) and unstructured
-  connectivity via *element-sized* gathers (E6), then 3D; as a `TrixiReactantExt` package
-  extension that swaps in array implementations of the volume and surface terms.
-+ Multi-chip runs (v5e-4/8, Reactant sharding) once single-chip numbers are settled.
-+ Report the Trixi issues (`@private` for KA's CPU backend, basis type constraints, symbolic
-  `node_indices`) on \#2822; mortars / non-conforming meshes are still untested.
++ *Report the Reactant issues* with minimal examples: type-valued kernel arguments, the raised
+  kernel with NaN results, the compiler crash, and what does not raise yet (data-dependent
+  loops, `sinpi`).
++ *Array formulation beyond Cartesian meshes*: curved P4est meshes (metric terms) and
+  unstructured connectivity via *element-sized* gathers (E6), then 3D. Packaged as a Trixi
+  package extension (code that is loaded only together with Reactant) that swaps in array
+  versions of the volume and surface terms.
++ Runs on 4–8 TPU chips (Reactant splits the arrays across chips) once single-chip numbers are
+  settled.
++ Report the Trixi issues (HalfSweep kernels on KA's CPU backend, basis type constraints,
+  `Symbol`-valued `node_indices`) on Trixi's GPU-porting issue \#2822; mortars /
+  non-conforming meshes are still untested.
 
 == Questions
 
 - Is *Float32* acceptable for the applications you have in mind?
-- *TPU access*: I currently pay for spot v5e myself (€0.49/h); could the group support a TPU
-  Research Cloud application or GCP credits?
 - Is the *upstream `P4estMesh` / KA path* the right scope (rather than `TreeMesh` / TrixiCUDA)?
-- E4/E5 suggest the TPU wants *array operations, not raised kernels*: would a Reactant-specific
-  array implementation of the volume and surface terms (package extension) be acceptable?
-- Whom should I talk to about upstream changes — the owners of the GPU porting issue \#2822?
-- Is the *AD angle* (Enzyme inside Reactant, as in Ariadne.jl) of interest for this project?
-
-#show: appendix
-
-= Appendix
-
-== Repositories
-
-- `junyixu/TrixiReactant.jl` (private): experiments E1–E4, `reactant_overrides.jl`, notes.
-- `junyixu/TrixiDocker` (public): Arch-based GPU image with Trixi, Reactant, CUDA.jl,
-  Enzyme and a separate TrixiCUDA environment, all precompiled; CUDA 12.9.
-  - Reactant_jll's CUDA build links `libcuda.so.1`, so the GPU-less CI runner precompiles it
-    against `CUDA_Driver_jll`'s forward-compatible `libcuda`.
+- Most of Trixi's kernels do not raise, and the ones that do are slow on the TPU because of
+  their index lookups, while the same solver written as array operations is fast. Would a
+  Reactant-specific *array implementation* of the volume and surface terms (package extension)
+  be acceptable?
+- Is *automatic differentiation* of interest for this project — Enzyme inside Reactant,
+  differentiating the compiled solver (as in Ariadne.jl)?
