@@ -144,6 +144,7 @@ TrixiCUDA currently stops at the `rhs!` level; with Reactant the time loop itsel
   [E7], [2D Euler DG written as array operations, checked against Trixi's `rhs!`], [TPU speed vs Trixi on a GPU; Float32 convergence; adaptive `dt`], [TPU, A100, CPU],
   [E8], [upstream Trixi's own CUDA kernels, P4est 2D and 3D], [GPU baseline for E7 and E9], [A100],
   [E9], [3D version of E7], [does the picture hold in 3D?], [TPU, A100],
+  [E10], [profiles of E7–E9 and three control runs], [where does the time go?], [TPU, A100],
 )
 
 #small[
@@ -371,28 +372,55 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 )
 
 - On the TPU the array form is *as fast as Trixi's own CUDA kernels on an A100*; on the A100
-  it is 2–3.6× faster still (P4est handles curved meshes — not quite like for like).
-- Cost per DOF at cloud prices: v5e ≈ A100 for the array code, both ≈ 3× cheaper than Trixi's
-  current kernels. Face gathers: 3.7× slower on the TPU, free on the A100.
+  it is 2–3.6× faster still. Cost per DOF at cloud prices: v5e ≈ A100 for the array code.
+- *Why* (E10): the array form is memory-bound on both; the TPU moves the same data as the A100
+  (6.1 vs 6.2 GB per `rhs!`, weak form) at half the bandwidth. Trixi spends 78–83% of its
+  `rhs!` in one generic volume kernel that runs one GPU thread per element.
+- Face gathers: 3.7× slower on the TPU (per-index cost, E6), free on the A100.
 
 == E9: 3D — where Trixi's GPU kernels shine
 
-`rhs!` in Float32, $64^3$ elements (16.8 M DOFs), same validation against Trixi ($10^(-11)$):
+`rhs!` in Float32, 16.8 M DOFs ($64^3$ elements unless noted), validated against Trixi ($10^(-11)$):
 
 #table(
   columns: (1.9fr, auto, auto),
   [*Implementation*], [*weak form*], [*flux differencing*],
-  [TPU v5e, array form], [37.0 ms], [49.2 ms],
+  [TPU v5e, array form, $64^3$ elements], [37.0 ms], [49.2 ms],
+  [TPU v5e, array form, $128 times 64 times 32$ elements], [18.9 ms], [22.7 ms],
   [A100, same array code via Reactant], [*12.9 ms*], [9.2 ms],
   [A100, upstream Trixi CUDA kernels (P4est)], [34.8 ms], [*5.2 ms*],
 )
 
-- Trixi's dedicated 3D shared-memory flux-differencing kernel is 1.8× faster than the array
-  form on the A100 and *9.4× faster than the TPU* (≈ 3.6× cheaper per DOF at cloud prices).
-- The TPU falls further behind in 3D: 3–5× slower than the A100 running the same code.
-  *Why is open — I have not profiled it.* A guess: the many dimensions of length 4 are padded to
-  the TPU's 128-wide memory tiles.
-- Compile times stay modest: largest 3D program 17 s (`rhs!`) / 68 s (whole time loop).
+#[
+  #set text(size: 17pt)
+  - *The $64^3$ TPU numbers lose a factor 2 to padding* (E10): the TPU tiles the fastest array
+    dimension by 128, and XLA put an element dimension of length 64 there. With a 128-long
+    dimension the same work runs twice as fast; 3D then costs 1.7× more per DOF than 2D, as expected.
+  - Trixi's dedicated flux-differencing kernel stays ahead: 1.8× faster than the array form on the
+    A100, 4.4× faster than the TPU. It reads each element once into shared memory; the array form
+    moves the state ≈ 28 times. Computing only half the pair fluxes made the array form *slower*.
+  - Compile times stay modest: largest 3D program 17 s (`rhs!`) / 68 s (whole time loop).
+]
+
+== E10: where the time goes
+
+Profiles (`Reactant.@profile`, `CUDA.@profile`) of every `rhs!` above, plus three control runs:
+
+#table(
+  columns: (1.6fr, auto, 1.4fr),
+  [*Explanation guessed after E7/E9*], [*Verdict*], [*Evidence*],
+  [array form limited by memory traffic, not arithmetic], [#ok], [7–11× the minimal reads/writes; elementwise kernels at 70–80% of peak bandwidth (A100)],
+  [TPU 2D slower than A100: lower bandwidth], [#ok], [same data moved, 570–720 vs 1100–1400 GB/s on average],
+  [TPU 3D extra loss: tile padding], [#ok], [64-long dimension in the 128-wide tiles; $128 times 64 times 32$ grid 2× faster],
+  [Trixi: generic volume kernel dominates], [#ok], [78–85% of `rhs!` (one thread per element)],
+  [array form 1.8× behind Trixi's 3D kernel because it computes every pair flux twice], [#no], [half the pair fluxes ran slower (copies of the pair arrays); the gap is data movement],
+)
+
+#small[
+  Minimal traffic per `rhs!`: read the state and the coordinates, write $partial_t u$ — about 2.5
+  passes over the state. The array form makes 19–39 passes: transposes before and after matrix
+  products, concatenations for neighbour shifts, intermediates that XLA does not fuse.
+]
 
 == E7: precision on the TPU
 
@@ -449,16 +477,17 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
   - *Trixi's KA kernels*: all 20 run through Reactant on a GPU unchanged, but only 4 raise in
     every case — today there is no TPU path by raising Trixi's kernels (E4).
   - *TPUs want array operations*: an indirect access costs ≈ 8 ns per index (E5, E6). Written as
-    array code, 2D DG on one v5e matches Trixi's CUDA kernels on an A100 (E7); 3D does not (E9).
+    array code, DG on one v5e matches the same code on an A100 per DOF and cost (2D; 3D once tile
+    padding is avoided), but trails Trixi's 3D flux-differencing kernel 4.4× (E7, E9, E10).
   - *Precision*: Float32 caps the error at ≈ $3 times 10^(-6)$ on this test (CPU and TPU alike);
     Float64 is 48–103× slower on the TPU; `dot_general` must run at HIGHEST.
-  - *Cost*: at cloud prices a v5e ≈ an A100 for the 2D array code — but the A100 also runs the
+  - *Cost*: at cloud prices a v5e ≈ an A100 for the array code — but the A100 also runs the
     existing Trixi code and fast Float64.
-  - *My reading*, judged by run time and cost per DOF: a TPU so far only *matches* a GPU, and
-    only for Float32-tolerant 2D runs on structured meshes, with a separate array implementation
-    (extra code to write and maintain). Unstructured meshes would need element-blocked gathers,
-    not yet tried in a solver. For Trixi in general GPUs remain the better target: the existing
-    kernels run there, Float64 is cheap, and 3D is faster.
+  - *My reading*, judged by run time and cost per DOF: a TPU so far only *matches* a GPU running
+    the same array code, for Float32-tolerant runs on structured meshes, with a separate array
+    implementation (extra code to write and maintain). Unstructured meshes would need
+    element-blocked gathers, not yet tried in a solver. For Trixi in general GPUs remain the better
+    target: the existing kernels run there, Float64 is cheap, Trixi's 3D kernel is 4.4× faster.
 ]
 
 #small[
@@ -478,6 +507,8 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
     arguments, the raised kernel with NaN results, the compiler crash, what does not raise yet
     (data-dependent loops, `sinpi`). Trixi, on its GPU-porting issue \#2822: HalfSweep kernels on
     KA's CPU backend, basis type constraints, `Symbol`-valued `node_indices`.
+  + *Cut data movement in the array form*: it reads and writes 7–11× the minimum (E10); choose
+    the dimension order to avoid transposes, and keep the fastest dimension a multiple of 128.
   + *Curved 2D P4est meshes*: add the metric terms to the array implementation of E7; validate
     against Trixi's `rhs!` and time it on the TPU.
   + *Unstructured 2D connectivity*: neighbours through element-blocked gathers instead of slices.
@@ -487,7 +518,7 @@ $L^2$ error of $rho$, weak form, $t = 0.5$ (order 4 expected):
   + *Mortars / non-conforming meshes*: not covered by any experiment so far.
 ]
 
-Steps 2–6 assume the array route; the questions on the next slides decide how far they go.
+Steps 2–7 assume the array route; the questions on the next slides decide how far they go.
 
 == Questions: precision and AD
 
