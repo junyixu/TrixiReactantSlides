@@ -360,7 +360,8 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
 
 == E7: TPU v5e vs A100
 
-`rhs!` in Float32, $2^10 times 2^10$ elements (16.8 M DOFs):
+One `rhs!`, Float32, `p4est_2d_dgsem/elixir_euler_source_terms.jl` (periodic $[0, 2]^2$):
+$2^10 times 2^10$ elements, $N = 3$ → 16.8 M nodes (DOFs per variable):
 
 #table(
   columns: (1.9fr, auto, auto),
@@ -368,15 +369,19 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
   [TPU v5e, array form, slices], [11.1 ms], [13.7 ms],
   [TPU v5e, array form, face gathers], [41.4 ms], [43.0 ms],
   [A100, same array code via Reactant], [*5.8 ms*], [*3.8 ms*],
-  [A100, upstream Trixi CUDA kernels (P4est)], [16.4 ms], [13.7 ms],
+  [A100, upstream Trixi 0.17.14 KA kernels (CUDA)], [16.4 ms], [13.7 ms],
 )
 
-- On the TPU the array form is *as fast as Trixi's own CUDA kernels on an A100*; on the A100
-  it is 2–3.6× faster still. Cost per DOF at cloud prices: v5e ≈ A100 for the array code.
-- *Why* (E10): the array form is memory-bound on both; the TPU moves the same data as the A100
-  (6.1 vs 6.2 GB per `rhs!`, weak form) at half the bandwidth. Trixi spends 78–83% of its
-  `rhs!` in one generic volume kernel that runs one GPU thread per element.
-- Face gathers: 3.7× slower on the TPU (per-index cost, E6), free on the A100.
+#[
+  #set text(size: 17pt)
+  - On the TPU the array form is *as fast as Trixi's own CUDA kernels on an A100*; on the A100
+    it is 2–3.6× faster still. Cost per DOF at cloud prices: v5e ≈ A100 for the array code.
+  - *Why* (E10): the array form is memory-bound on both; the TPU moves the same data as the A100
+    (6.1 vs 6.2 GB per `rhs!`, weak form) at half the bandwidth. Trixi spends 78–83% of its
+    `rhs!` in `volume_integral_KAkernel!`: one thread per element loops over all its nodes
+    (2D has no shared-memory kernel like 3D's `HalfSweep`).
+  - Face gathers: 3.7× slower on the TPU (per-index cost, E6), free on the A100.
+]
 
 == E9: 3D — where Trixi's GPU kernels shine
 
@@ -396,7 +401,7 @@ E2's 1D DG solver on the v5e, 100 RK steps, everything compiled by Reactant:
   - *The $64^3$ TPU numbers lose a factor 2 to padding* (E10): the TPU tiles the fastest array
     dimension by 128, and XLA put an element dimension of length 64 there. With a 128-long
     dimension the same work runs twice as fast; 3D then costs 1.7× more per DOF than 2D, as expected.
-  - Trixi's dedicated flux-differencing kernel stays ahead: 1.8× faster than the array form on the
+  - Trixi's shared-memory flux-differencing kernel (`HalfSweep`, its default in 3D) stays ahead: 1.8× faster than the array form on the
     A100, 4.4× faster than the TPU. It reads each element once into shared memory; the array form
     moves the state ≈ 28 times. Computing only half the pair fluxes made the array form *slower*.
   - Compile times stay modest: largest 3D program 17 s (`rhs!`) / 68 s (whole time loop).

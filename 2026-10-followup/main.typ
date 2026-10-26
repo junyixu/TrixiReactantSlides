@@ -54,7 +54,7 @@
   [*E13*: the PR tested with the kernel inventory (E4) and the whole `rhs!` (E3)],
   [#ok],
   [Reactant first: it will expose low-level problems],
-  [10 issue reports drafted with minimal examples, not posted yet],
+  [9 issue reports drafted with minimal examples, re-tested on Reactant 0.2.297, not posted yet],
   [#warn],
   [question: the same speed by changing KA kernels, without Reactant?],
   [*E17*: on an A100 the E11 changes make the kernel 7–9× slower; Trixi's HalfSweep is already fast],
@@ -69,21 +69,25 @@
 
 == Experiments since 16 October
 
-#table(
-  columns: (auto, 1.25fr, 2fr),
-  [*Exp.*], [*Topic*], [*Result*],
-  [E14], [whole simulations; time loop], [GPU test cases within Float32 tolerances; one program per RK stage],
-  [E15], [GLM-MHD], [Trixi's MHD functions unchanged; to round-off],
-  [E16, E20], [2D `P4estMesh`], [to round-off; brick path 12× faster than the gather],
-  [E17], [A100], [array code: weak form 2.8× faster than Trixi's kernels, flux diff. 2.3× slower],
-  [E18], [mortars], [to round-off with 298 mortars on a curved unstructured mesh],
-  [E19], [JAX in the image], [a Pallas kernel runs inside a Reactant program on the TPU, exactly],
-  [E21], [AMR], [adapted meshes reuse one compiled program],
-  [E22], [shock capturing], [to round-off; 10–13% more than flux differencing],
-  [E23], [Pallas volume kernel], [12.6× faster than XLA; flux-differencing time step 1.73× faster],
-  [E24], [4 TPU chips], [linear scaling, bitwise identical results],
-  [E25], [2D mortars, shock capturing, AMR], [to round-off; whole runs and AMR runs also match Trixi's test values],
-)
+#[
+  #show table: set text(size: 13.5pt)
+  #table(
+    columns: (auto, 1.25fr, 2fr),
+    [*Exp.*], [*Topic*], [*Result*],
+    [E14], [whole simulations; time loop], [GPU test cases within Float32 tolerances; one program per RK stage],
+    [E15], [GLM-MHD], [Trixi's MHD functions unchanged; to round-off],
+    [E16, E20], [2D `P4estMesh`], [to round-off; brick path 12× faster than the gather],
+    [E17], [A100], [array code: weak form 2.8× faster than Trixi's kernels, flux diff. 2.3× slower],
+    [E18], [mortars], [to round-off with 298 mortars on a curved unstructured mesh],
+    [E19], [JAX in the image], [a Pallas kernel runs inside a Reactant program on the TPU, exactly],
+    [E21], [AMR], [adapted meshes reuse one compiled program],
+    [E22], [shock capturing], [to round-off; 10–13% more than flux differencing],
+    [E23], [Pallas volume kernel], [12.6× faster than XLA; flux-differencing time step 1.73× faster],
+    [E24], [4 TPU chips], [linear scaling, bitwise identical results],
+    [E25], [2D mortars, shock capturing, AMR], [to round-off; whole runs and AMR runs also match Trixi's test values],
+    [E26], [whole RK stage as one Pallas kernel], [18.2 ms per RK step, faster than Trixi on an A100 (≈ 33 ms)],
+  )
+]
 
 #small[*To round-off*: `rhs!` and whole Float64 simulations agree with Trixi to $≈ 10^(-12)$ or better.]
 
@@ -552,6 +556,7 @@ $alpha$ first-order finite volumes on the subcells. All array operations, no bra
   [A100, array prototype (Reactant → CUDA)], [*12.9 ms*], [14.7 ms], [67 / 99 ms],
   [TPU v5e, array prototype (E12, E14)], [38.9 ms], [55.7 ms], [197 / 283 ms],
   [TPU v5e, with the Pallas volume kernel (E23)], [—], [32.3 ms], [— / 164 ms],
+  [TPU v5e, whole RK stage in one Pallas kernel (E26)], [—], [3.1 ms], [— / *18.2 ms*],
 )
 
 #[
@@ -564,7 +569,7 @@ $alpha$ first-order finite volumes on the subcells. All array operations, no bra
     volume kernel (one thread per element, 78–85% of its `rhs!`, E10).
 ]
 
-#small[RK step: weak form / flux differencing, one compiled program per stage (E14).]
+#small[RK step: weak form / flux differencing, one compiled program per stage (E14); E26: one program for all steps.]
 
 == E23: a hand-written TPU kernel for the volume term
 
@@ -586,6 +591,170 @@ intermediate values stay in on-chip memory.
 - Price: TPU-only code, and the two-point flux written again in JAX.
 
 #small[*Pallas*: JAX's language for TPU kernels; Reactant embeds the lowered kernel with `Ops.hlo_call`.]
+
+== E23: source code — Trixi's `HalfSweep` vs Pallas `kernel_slab`
+
+#grid(
+  columns: (1fr, 1.05fr),
+  gutter: 0.8em,
+  [
+    #text(size: 13.5pt, weight: "bold")[Trixi `HalfSweep` (`dg_3d_gpu.jl`): 1 thread / node]
+    #text(size: 10.5pt)[
+      ```julia
+      i, j, k, element = @index(Global, NTuple)
+      flux_local = @localmem eltype(du) (NVARS, N, N, N)
+      u_node = get_node_vars(u, equations, dg, i, j, k, element)
+      @unroll for offset in 1:div(N, 2)   # half of the pairs
+        ii = mod(i - 1 + offset, N) + 1
+        u_ii = get_node_vars(u, equations, dg, ii, j, k, element)
+        Ja_avg = 0.5f0 * (Ja1_node + Ja1_node_ii)
+        flux = volume_flux(u_node, u_ii, Ja_avg, equations)
+        flux_local[:, i, j, k] = flux     # stage in shared mem
+        @synchronize                      # barrier 1
+        iib = mod(i - 1 - offset, N) + 1
+        du_local += (w * D_split[i, ii])  * flux +
+                    (w * D_split[i, iib]) * flux_local[:, iib, j, k]
+        @synchronize                      # barrier 2
+      end
+      ```
+    ]
+  ],
+  [
+    #text(size: 13.5pt, weight: "bold")[Pallas `kernel_slab` (`e23_pallas_fd.py`): $B$ elements / block]
+    #text(size: 10.5pt)[
+      ```python
+      # DMA block (c, N, N, N, B) from HBM -> VMEM; D_split in SMEM
+      blk = lambda c: pl.BlockSpec((c, N, N, N, B), lambda e: (0,0,0,0,e))
+      pl.pallas_call(kernel_slab, grid=(E // B,),
+        in_specs=[pl.BlockSpec(memory_space=SMEM), blk(5), blk(9)],
+        out_specs=blk(5))
+
+      def kernel_slab(ds_ref, u_ref, ja_ref, o_ref):
+        a = prim([u_ref[v] for v in range(5)])  # once in VMEM (as FluxTurbo)
+        for d in range(3):
+          for i in range(N):
+            ai, jai = node_slice(a, d, i), node_slice(ja[d], d, i)
+            for ii in range(N):
+              if ii == i: continue              # skip zero diagonal only
+              b = node_slice(a, d, ii)          # full sweep, no symmetry
+              nrm = 0.5 * (jai + node_slice(ja[d], d, ii))
+              acc += ds_ref[i, ii] * kg(ai, b, *nrm)
+            o_ref[:, slab(d, i)] += acc         # VMEM accumulate, 0 barriers
+      ```
+    ]
+  ],
+)
+
+#[
+  #set text(size: 14.5pt)
+  - *1. Does Pallas compute only half the pairs?* *No* — it is a `FullSweep + FluxTurbo` (skips the
+    zero diagonal `ii == i`, 12 of 16 pairs, and precomputes `prim(u)` once in VMEM). At 2.19 ms
+    (570 GB/s) it is already HBM-bandwidth-bound, so extra on-chip flops are free.
+  - *2. Does it use shared memory?* *Yes — TPU `VMEM` + `SMEM`*, with *no `@synchronize` barriers*
+    because one SIMD instruction stream processes the whole block of $B = 512$–$1024$ elements sequentially.
+]
+
+== E23: GPU vs TPU memory hierarchy and sweep comparison
+
+#[
+  #show table: set text(size: 12pt)
+  #set table(inset: (x: 5pt, y: 3.5pt))
+  #table(
+    columns: (1.1fr, 1.25fr, 1.95fr),
+    [*GPU (`HalfSweep` / `FullSweep`)*], [*TPU (`Pallas kernel_slab`)*], [*Role and architectural difference*],
+    [Global memory (VRAM)], [*HBM* (16 GB on v5e)], [Full arrays `u`, `Ja`, `V` ($E = 262,144$ elements); 1 read + 1 write (≈ 570 GB/s)],
+    [Shared memory (`@localmem`) + regs], [*VMEM* (Vector Memory, 16–32 MB)], [Holds `u_ref`, `ja_ref`, `o_ref`, `prim(u)` for *$B = 512$–$1024$ elements at once* (vs 1 el. / 48 KiB)],
+    [Constant memory / scalar regs], [*SMEM* (Scalar Memory)], [Holds the $4 times 4$ matrix `D_split` (`ds_ref[i, ii]` scalar coefficients)],
+    [SIMT: $N^3 = 64$ threads / element → *needs `@synchronize`*], [Wide SIMD (VPU, $8 times 128$ tiles) → *0 barriers*], [One instruction stream sweeps slabs `(N, N, B)` in VMEM; no inter-thread race exists],
+  )
+
+  #v(0.15em)
+
+  #table(
+    columns: (1.55fr, auto, auto, auto, auto, auto),
+    [*3D FD volume kernel (262k el., $n = 4$)*], [*Flux pairs / dir.*], [*On-chip mem.*], [*Barriers*], [*HBM traffic*], [*Time*],
+    [A100, Trixi `HalfSweep` (CUDA)], [$N(N-1)\/2 = 6$], [`flux_local` (shared)], [$6 floor(N\/2) = 12$], [≈ 1×], [*2.11 ms*],
+    [A100, Trixi `FullSweep` (CUDA)], [$N^2 = 16$], [`u_local` (shared)], [1], [≈ 1×], [3.12 ms],
+    [A100, Trixi `FullSweepGlobal` (CUDA)], [$N^2 = 16$], [none (L1/L2 cache)], [0], [cached], [3.95 ms],
+    [TPU v5e, `FullSweepGlobal` *raised* (E11)], [$N^2 = 16$ (unrolled)], [XLA auto (spills)], [0], [≈ 100 arrays (34 GB)], [47.8 ms],
+    [TPU v5e, *Pallas `kernel_slab`* (E23)], [$N(N-1) = 12$], [*VMEM + SMEM*], [*0*], [*1 read + 1 write*], [*2.19 ms*],
+  )
+]
+
+== E23: why Pallas goes through Python (JAX), and how it embeds in Julia
+
+#[
+  #set text(size: 15.5pt)
+  + *No low-level TPU kernel DSL in Julia yet*:
+    - On GPUs, `CUDA.jl` / `KernelAbstractions.jl` compile Julia `@kernel` code with `@localmem` straight to PTX.
+    - On TPUs, on-chip memory (`VMEM` / `SMEM`) and DMA are controlled by Google's closed-source Mosaic compiler inside `libtpu` (MLIR `tpu` dialect). The only public frontend that emits Mosaic `tpu_custom_call` kernels today is *JAX's Pallas* (`jax.experimental.pallas`).
+  + *Reactant emits standard StableHLO, not Mosaic kernels*:
+    - JAX lowers the Pallas kernel once to a StableHLO module containing `stablehlo.custom_call @tpu_custom_call`, and Reactant splices that MLIR into the Julia `rhs!` with `Reactant.Ops.hlo_call`.
+  + *Zero Python overhead at run time*:
+    - Python/JAX runs *only once at lowering time* (or offline to a `.mlir` file); during time stepping the whole RK stage runs natively inside XLA/Julia.
+]
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 0.8em,
+  [
+    #text(size: 12.5pt, weight: "bold")[1. Lower once in JAX (`e23_pallas_fd.py`)]
+    #text(size: 10.5pt)[
+      ```python
+      f = jax.jit(lambda ds, u, ja:
+        fd_pallas(ds, u, ja, B, "slab"))
+      mlir = f.trace(
+        spec(N, N), spec(5, N, N, N, E), spec(9, N, N, N, E)
+      ).lower(lowering_platforms=("tpu",)).as_text()
+      ```
+    ]
+  ],
+  [
+    #text(size: 12.5pt, weight: "bold")[2. Embed in Julia `rhs!` (`e12_p4est_array.jl`)]
+    #text(size: 10.5pt)[
+      ```julia
+      function volume_pallas(p, cfg, U)
+        us = cat(map(lead, U)...; dims = 1)
+        V  = Reactant.Ops.hlo_call(
+               PALLAS_MLIR, p.dsplit, us, p.Jall)[1]
+        return ntuple(c -> reshape(V[c:c,:,:,:,:], n,n,n,E), 5)
+      end
+      ```
+    ]
+  ],
+)
+
+== E26: the whole RK stage in one Pallas kernel
+
+E23 left ≈ 30 ms outside the volume term. E26 does everything in one kernel, on the brick path's
+state as it is: volume term, surface fluxes (neighbours from the same block or one extra node layer),
+Dirichlet values, source terms, Jacobian — and the RK stage update.
+
+#[
+  #show table: set text(size: 13.5pt)
+  #table(
+    columns: (2.2fr, auto, auto),
+    [*262,144 elements, flux differencing, Float32*], [*`rhs!`*], [*RK step*],
+    [TPU v5e, XLA (E12, E14)], [55.6 ms], [283.8 ms],
+    [TPU v5e, Pallas volume kernel (E23)], [32.7 ms], [165.4 ms],
+    [TPU v5e, whole `rhs!` in one kernel], [3.1 ms#super[a]], [28.7 ms],
+    [TPU v5e, *whole RK stage in one kernel*], [—], [*18.2 ms*],
+    [A100, Trixi's CUDA kernels (E17)], [6.5 ms], [≈ 33 ms#super[b]],
+  )
+]
+
+#[
+  #set text(size: 16pt)
+  - Correct: the whole run (317 steps) is within the GPU test's Float32 tolerances. 3.6 ms per stage
+    ≈ 650 GB/s, about 80% of the chip's peak: only the necessary data moves.
+  - The time loop has to be one compiled program: at every program boundary XLA copies each kernel
+    input into the kernel's layout (≈ 5 ms; one program per stage: 51.8 ms per step).
+]
+
+#small[
+  #super[a] Kernel alone; as a program of its own 8.0 ms (the copies). #super[b] 5 × `rhs!`, without the
+  update. RK step: one program per stage for XLA and E23 (their best, E14), one for all steps for E26.
+]
 
 == E24: several TPU chips
 
@@ -614,8 +783,8 @@ annotations); XLA inserts the communication between neighbouring chips. No other
 #[
   #set text(size: 17pt)
   - *KernelAbstractions*: the bounds check of a 4D index range cannot be raised (E11).
-  - *Reactant*: a crash in an integer-remainder optimization (E11); `UInt8` arrays as kernel
-    arguments (E13); an undefined `_derived_array` (E13); printing a method signature with an
+  - *Reactant*: converting `UInt8` to a float in a raised kernel (E13); `reshape` inside a kernel
+    calls an undefined `_derived_array` (E13); printing a method signature with an
     `SVector` type parameter during tracing (E12); the `dot` / `norm` / `map` overlays treat static
     vectors of traced numbers as XLA arrays (E12, E25); arithmetic on traced `Bool`s (E25).
   - *Trixi*: the KA (GPU) path has no mortars (E18); patterns that block tracing — branches on values,
@@ -623,7 +792,11 @@ annotations); XLA inserts the communication between neighbouring chips. No other
   - *Trixi PR \#3332*: the `UInt8` enum base type meets the Reactant bug above; `Int8` works (E13).
 ]
 
-#small[All are worked around in the prototype; none requires changing Trixi to run it.]
+#small[
+  All are worked around in the prototype; none requires changing Trixi to run it. Re-tested with
+  Reactant 0.2.297 (22 Oct): the E11 compiler crash is gone — Trixi's FullSweepGlobal now raises
+  unchanged, without gathers; all others are still there.
+]
 
 = Summary
 
@@ -635,14 +808,17 @@ annotations); XLA inserts the communication between neighbouring chips. No other
     — curved unstructured meshes, mortars, AMR without recompiling, shock capturing, MHD — to
     round-off in Float64, with Trixi's physics functions unchanged; whole simulations agree within
     the Float32 tolerances. (Upstream Trixi's GPU path cannot run non-conforming meshes.)
-  - *Speed, one TPU v5e chip vs Trixi on an A100*: 3D weak form 38.9 vs 36.0 ms, flux differencing
-    32.3 ms (with Pallas) vs 6.5 ms; 2D (16.8 M nodes) 18.3 / 27.2 vs 16.4 / 13.7 ms.
+  - *Speed, one TPU v5e chip vs Trixi on an A100* (3D, 262,144 elements): weak form 38.9 vs
+    36.0 ms per `rhs!`; flux differencing with each RK stage in one Pallas kernel 18.2 vs ≈ 33 ms per
+    RK step (E26). 2D (16.8 M nodes): 18.3 / 27.2 vs 16.4 / 13.7 ms per `rhs!`.
   - *Several chips* scale linearly: 4 chips 4× faster, ≈ 500,000 elements per chip.
-  - *Data movement is still the limit*: XLA's code moves several times the necessary data.
-    Hand-written kernels fix this term by term (volume term 12.6×), at the price of TPU-only code.
-  - *My reading*: Trixi can run on TPUs with the full P4est feature set; the weak form is
-    on par with Trixi's current GPU kernels per chip, flux differencing needs hand-written kernels for every term to approach a
-    GPU. For Trixi in general, GPUs remain the simpler target.
+  - *Data movement was the limit*: XLA's code moves about 10× the necessary data; one hand-written
+    kernel per RK stage moves only the necessary data (≈ 80% of peak), at the price of TPU-only code
+    with the physics written again in JAX.
+  - *My reading*: Trixi can run on TPUs with the full P4est feature set. Per chip, the weak form
+    in XLA is on par with Trixi's GPU kernels; flux differencing passes them only with hand-written
+    kernels (so far Euler 3D on brick meshes). For Trixi in general GPUs remain the simpler target;
+    TPUs pay off where a few kernels are worth writing.
 ]
 
 = Next steps
@@ -652,11 +828,44 @@ annotations); XLA inserts the communication between neighbouring chips. No other
 #[
   #set text(size: 17pt)
   + *Post the issue reports* (drafts ready).
-  + *Speed*: Pallas kernels for the surface terms; AMR's host part (indicator, projection) on the
-    device; tree faces without the copy (E12).
+  + *A fair GPU comparison*: the same fused kernel on an A100 (next slide).
+  + *Speed*: the fused kernel (E26) for more equations and for unstructured meshes; AMR's host
+    part (indicator, projection) on the device.
   + *Package extension*: the prototype as a Reactant backend for Trixi's P4est solver.
   + *AD*: not started (via Trixi Slack, as discussed).
 ]
 
-*Open questions*: Is TPU-only kernel code acceptable in a package extension? Are more chips worth a
-quota request?
+*Open questions*
+
+#[
+  #set text(size: 17pt)
+  - Is TPU-only kernel code (Pallas) acceptable in a package extension?
+  - Are more chips worth a quota request?
+  - AD: you mentioned Valentin Churavy's AD pull requests for Trixi. Are they Enzyme.jl on Trixi's
+    native path? (My guess, not checked — I would ask him on Trixi Slack.)
+]
+
+== Next: the same fused kernel on an A100
+
+*Why*: E26 compares a hand-fused TPU kernel with Trixi's current, unfused GPU kernels. An A100 has
+2.5× the memory bandwidth of a v5e (≈ 2 TB/s vs 819 GB/s), so a GPU kernel fused the same way
+should be faster per chip, and per euro the two may be close. Only the same optimization on both
+sides shows whether the TPU hardware itself pays off.
+
+*How*:
+
+#[
+  #set text(size: 17pt)
+  - Start from Trixi's `HalfSweep` kernel (volume term in shared memory) and add the surface
+    integral, boundary values, source terms, the Jacobian and even the RK stage update to the same
+    kernel; intermediate values stay in registers and shared memory, nothing goes back to device
+    memory in between.
+  - Read the neighbours' face values straight from global memory: on a GPU such indexed reads
+    (gathers) are much cheaper than on a TPU (E6).
+  - Run it with CUDA.jl on an A100; compare time and achieved bandwidth with E26's TPU kernel.
+]
+
+#small[
+  If bandwidth-bound like E26: ≈ 2.4 GB per stage at ≈ 1.5 TB/s → ≈ 1.6 ms per stage, ≈ 8 ms per RK
+  step (v5e: 18.2 ms). On-demand prices: A100 ≈ \$1.2–1.8/h (RunPod), v5e €1.37/h (GCP).
+]
