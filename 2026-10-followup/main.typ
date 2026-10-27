@@ -612,7 +612,7 @@ them:
 == Next steps and open questions
 
 #[
-  #set text(size: 16.5pt)
+  #set text(size: 15pt)
   + *The same fusion on an A100*: Trixi's HalfSweep plus surface terms, sources and the RK update
     in one CUDA kernel, compared with the fused Pallas kernel. An A100 has 2.5× the bandwidth of a v5e; if
     bandwidth-bound, ≈ 8 ms per RK step (v5e: 18.2 ms). Prices: v5e €1.37/h, A100 ≈ \$1.2–1.8/h.
@@ -622,14 +622,17 @@ them:
   + *More Pallas kernels* (other equations, unstructured meshes): only if step 1 favours TPUs.
   + *Several TPU chips*: Reactant can split the arrays along the element dimension without code
     changes, so I expect near-linear scaling; needs more TPU quota.
-  + *AD*: not started (via Trixi Slack, as discussed).
+  + *AD*: not started. In November I may compare AD in Reactant.jl and KA.jl with Valentin Churavy
+    on Trixi Slack. Reactant's claimed advantage: Enzyme differentiates the whole traced tensor
+    program (StableHLO), and XLA optimizes the derivative like any other program. With KA, Enzyme
+    differentiates each kernel separately in LLVM IR (a tape per thread, atomic adds where threads
+    read the same data).
 ]
 
 *Open questions*
 
 #[
-  #set text(size: 16.5pt)
+  #set text(size: 15pt)
   - Is TPU-only kernel code (Pallas) acceptable in a package extension?
-  - AD: you mentioned Valentin Churavy's AD pull requests for Trixi. Are they Enzyme.jl on Trixi's
-    native path? (My guess, not checked — I would ask him on Trixi Slack.)
+  - AD: find a potential application (perhaps together with Valentin Churavy; maybe in November).
 ]
