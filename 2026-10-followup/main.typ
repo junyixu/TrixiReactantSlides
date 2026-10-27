@@ -622,10 +622,9 @@ them:
   + *More Pallas kernels* (other equations, unstructured meshes): only if step 1 favours TPUs.
   + *Several TPU chips*: Reactant can split the arrays along the element dimension without code
     changes, so I expect near-linear scaling; needs more TPU quota.
-  + *AD*: not started. In November I may compare AD in Reactant.jl and KA.jl with Valentin Churavy
-    on Trixi Slack. Reactant's claimed advantage: Enzyme differentiates the whole traced tensor
-    program (StableHLO), and XLA optimizes the derivative like any other program. With KA, Enzyme
-    differentiates each kernel separately in LLVM IR (a tape per thread, atomic adds where threads
+  + *AD*: not started. Reactant's claimed advantage (not verified yet): Enzyme differentiates the whole traced tensor
+    program (StableHLO), and XLA optimizes the derivative like any other program.
+    With KA, Enzyme differentiates each kernel separately in LLVM IR (a tape per thread, atomic adds where threads
     read the same data).
 ]
 
@@ -634,5 +633,5 @@ them:
 #[
   #set text(size: 15pt)
   - Is TPU-only kernel code (Pallas) acceptable in a package extension?
-  - AD: find a potential application (perhaps together with Valentin Churavy; maybe in November).
+  - AD: find a potential application (maybe in November).
 ]
