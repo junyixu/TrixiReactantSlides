@@ -23,6 +23,8 @@
 #let warn = text(fill: rgb("#ef6c00"), weight: "bold")[!]
 // glossary / footnote text for terms from outside numerical analysis
 #let small(body) = block(above: 0.8em, text(size: 12.5pt, fill: luma(70), body))
+// issue in the experiment repository
+#let repo-issue(n) = link("https://github.com/junyixu/TrixiReactant.jl/issues/" + str(n))[TrixiReactant.jl \##n]
 
 #title-slide()
 
@@ -58,8 +60,9 @@
     [#no no],
     [`Symbol` → enum (Trixi PR \#3332)],
     [With the PR, Trixi's own kernels raise without my integer workarounds (`Int8`; `UInt8` hits a
-      Reactant bug). The array code does not need it],
-    [#no no],
+      Reactant bug: #repo-issue(6)). The array code does not need it. Why `Symbol`s fail in XLA,
+      tests with the PR: #repo-issue(9)],
+    [#ok tested],
     [Reactant first: it will expose low-level problems],
     [3 issues reported to Reactant.jl, fixes for 2 of them as pull requests],
     [#ok as found],
