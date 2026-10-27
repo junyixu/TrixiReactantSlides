@@ -450,6 +450,164 @@ TPU v5e, Float32, $1024 times 1024$ elements (16.8 M nodes, as in E7), Euler, `r
   the TPU costs per index (E6).
 ]
 
+== Unstructured meshes: what needs a gather
+
+Only the neighbour lookup depends on how the elements are connected. 1D toy example (advection,
+DGSEM), surface term at the left face of element `e`:
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 0.8em,
+  [
+    #text(size: 13.5pt, weight: "bold")[Kernel: 1 thread / node]
+    #text(size: 11pt)[
+      ```julia
+      i, e = @index(Global, NTuple)
+      if i == 1
+        eL = left[e]    # brick: e - 1 (periodic)
+        acc -= (u[N, eL] - u[1, e]) * inv_w1
+      end
+      ```
+    ]
+  ],
+  [
+    #text(size: 13.5pt, weight: "bold")[Array, brick mesh: shift by one element]
+    #text(size: 11pt)[
+      ```julia
+      uL = hcat(u[N:N, end:end], u[N:N, 1:(end - 1)])
+      ```
+    ]
+    #text(size: 13.5pt, weight: "bold")[Array, unstructured mesh: index array]
+    #text(size: 11pt)[
+      ```julia
+      uL = u[N:N, left]    # left::Vector{Int}: gather
+      ```
+    ]
+  ],
+)
+
+#[
+  #show table: set text(size: 13.5pt)
+  #table(
+    columns: (1.4fr, 1fr, 1.6fr),
+    [*Part of `rhs!`*], [*Brick mesh*], [*Unstructured mesh*],
+    [volume term, metric terms], [matrix products, elementwise], [unchanged: inside one element],
+    [which nodes lie on a face], [slices], [unchanged: fixed by the reference element],
+    [which element is the neighbour], [shift: slices], [index array: *gather*],
+    [node order on the neighbour's face], [identity], [8 orientations in 3D, 2 in 2D: flip after the gather],
+  )
+]
+
+#[
+  #set text(size: 15pt)
+  - Both routes need a gather. A raised kernel reads `u[N, left[e]]` one number per index (scalar
+    gathers, E2, E5); the array code gathers one whole face per index (all variables and $n^2$
+    nodes: 80 numbers for 3D Euler at $n = 4$), and keeps the regular parts as slices.
+]
+
+== Unstructured meshes: what the gather costs
+
+TPU v5e, Float32, weak-form `rhs!`:
+
+#table(
+  columns: (2fr, auto, auto, auto),
+  [*Mesh*], [*Neighbours*], [*time*], [*per node*],
+  [3D brick, 262,144 elements, $n = 4$ (E12)], [slices], [38.9 ms], [2.3 ns],
+  [3D curved unstructured, 13,056 elements, $n = 5$ (E12)], [gather], [17.3 ms], [11 ns],
+  [2D Cartesian, $1024 times 1024$ elements, $n = 4$ (E20 / E16)], [slices / gather], [18.3 / 227 ms],
+  [1.1 / 13.5 ns],
+  [2D curved unstructured, 1.6 M elements, $n = 4$ (E25)], [gather], [389 ms], [15 ns],
+)
+
+#[
+  #set text(size: 16pt)
+  - The cost comes from the gather path, not from the mesh: the 2D Cartesian mesh through the
+    gather costs about as much per node as the curved unstructured one (13.5 vs 15 ns).
+  - A gather on the TPU costs per index, ≈ $1.2 times 10^8$ indices/s (E6). A whole face per index
+    helps more in 3D ($n^2$ nodes per face) than in 2D ($n$ nodes).
+  - In between, tree blocks (E12, next two slides): slices inside each tree, one gather of whole tree
+    faces between trees; 1.4× faster than the gather with $8^3$ elements per tree, slower with $4^3$.
+    Non-uniform refinement (AMR) breaks the blocks; E21 uses the gather path.
+]
+
+#small[
+  On a GPU an indexed read is cheap (A100: 130–480 GB/s even for scalar gathers, E6); the per-index
+  cost is specific to the TPU.
+]
+
+== Tree blocks: where the time goes
+
+Uniformly refined mesh, trees of $m times m times m$ elements; state $(n, n, n, m, m, m, T)$ per
+variable, trees last. Faces inside a tree: slices. Faces between trees, in every `rhs!`:
+
+#[
+  #show table: set text(size: 13.5pt)
+  #table(
+    columns: (auto, 2.4fr, 1.3fr),
+    [], [*Step*], [*Why*],
+    [1], [slice the 6 tree faces (outer element and node layer): $(n, n, m, m, T)$], [own face values],
+    [2], [*interleave* node and element axes: $(n, m, n, m, T) -> (n m, n m, T)$],
+    [face as one $n m times n m$ grid],
+    [3], [concatenate 6 faces × 5 variables, *one gather* of whole tree faces ($6 T$ indices)],
+    [neighbour's face values],
+    [4], [per orientation that occurs: flip / transpose all faces, select by mask],
+    [neighbour's node order],
+    [5], [surface flux; *undo step 2*, pad back into the element layout], [add to $partial_t u$],
+  )
+]
+
+#[
+  #set text(size: 15.5pt)
+  - Profile (32,768 elements, $4^3$ per tree, 512 trees): most of the time goes into the step-2
+    copies, 35–38 GB/s (HBM ≈ 820 GB/s); 94–122 state-sized reads and writes per `rhs!`.
+  - Tree faces are $6 \/ (n m)$ of the state: 37% with $4^3$ trees, 19% with $8^3$ ($n = 4$),
+    consistent with tree blocks paying off only for large trees.
+  - Step 2 exists only so that an orientation is a flip or transpose of a 2D grid.
+]
+
+== Tree blocks: a layout without rearranging tree faces
+
+#text(size: 15pt, fill: luma(90))[Proposal from the E12 notes, not implemented yet.]
+
+#grid(
+  columns: (1fr, 1.15fr),
+  gutter: 1em,
+  align: top,
+  [
+    #set text(size: 15pt)
+    Along a face direction, node $i$ of element $k$ is grid point $j = i + n (k - 1)$, and
+    $ n m + 1 - j = (n + 1 - i) + n (m - k). $
+    Reversing a grid axis is reversing its node axis *and* its element axis; transposing the grid
+    is swapping the two (node, element) pairs. So all 8 orientations work on the face as sliced
+    in step 1:
+    #text(size: 12pt)[
+      ```julia
+      # F: (node_b, node_c, elem_b, elem_c, tree)
+      flip_b(F) = reverse(F; dims = (1, 3))
+      flip_c(F) = reverse(F; dims = (2, 4))
+      transp(F) = permutedims(F, (2, 1, 4, 3, 5))
+      ```
+    ]
+  ],
+  [
+    #set text(size: 14.5pt)
+    - *Drop step 2 and its inverse*: orientation, boundary values, normals and surface flux all on
+      $(n, n, m, m, T)$; the flux goes back with a pad only. Trees stay the fastest axis, so the
+      reverses and permutations touch only outer axes.
+    - *Tree count not a multiple of 128* (curved mesh: 204 trees, padded to 256): merge the trees
+      with one element axis ($8 times 204 = 1632$, padded to 1664: 2% instead of 25%). Price: tree
+      faces and inner neighbours along that axis become unaligned slices of the fastest axis.
+    - *Open*: the gather then takes whole faces along the fastest axis (strided in memory); E6
+      measured only contiguous blocks. Fallback: gather from a trees-outer copy of the faces only.
+  ]
+)
+
+#small[
+  The three functions were checked on the CPU against E12's flip and transpose of the interleaved
+  grid. Goal: tree blocks faster than the gather at $4^3$ too (now 23.2 vs 17.3 ms), towards the
+  brick path's 2.3 ns per node.
+]
+
 == E18: mortars (non-conforming meshes)
 
 A small face takes the L2 projection of the large face as its neighbour value; the large face gets
