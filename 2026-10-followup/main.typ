@@ -91,6 +91,116 @@
 
 #small[*To round-off*: `rhs!` and whole Float64 simulations agree with Trixi to $≈ 10^(-12)$ or better.]
 
+= Background: slices and gathers
+
+== What a gather is
+
+Reading an array at positions that are themselves *data*, stored in an integer array.
+
+// one row of the array picture: the cells at the positions in `hl` are filled
+#let mem-row(label, hl, fill, result) = (
+  align(right, label),
+  ..(10, 20, 30, 40, 50, 60).enumerate().map(((i, v)) => table.cell(
+    stroke: 0.5pt + luma(150),
+    fill: if (i + 1) in hl { fill },
+  )[#v]),
+  align(left, result),
+)
+
+#grid(
+  columns: (1fr, 1.15fr),
+  gutter: 1em,
+  align: top,
+  [
+    #text(size: 18pt)[
+      ```julia
+      x = [10, 20, 30, 40, 50, 60]
+
+      # slice: positions fixed in the program
+      x[2:4]          # [20, 30, 40]
+
+      # gather: positions read from an array
+      idx = [6, 1, 4]
+      x[idx]          # [60, 10, 40]
+
+      # the same as
+      [x[idx[k]] for k in 1:3]
+      ```
+    ]
+  ],
+  [
+    #table(
+      columns: (auto,) + (2em,) * 6 + (auto,),
+      align: center + horizon,
+      stroke: none,
+      inset: (x: 4pt, y: 5pt),
+      [], ..range(1, 7).map(i => text(size: 11pt, fill: luma(110), str(i))), [],
+      ..mem-row(`x[2:4]`, (2, 3, 4), rgb("#bbdefb"), [→ `[20, 30, 40]`]),
+      ..mem-row(`x[idx]`, (6, 1, 4), rgb("#ffe0b2"), [→ `[60, 10, 40]`]),
+      align(right, text(size: 13pt, fill: rgb("#ef6c00"))[`k`]),
+      ..("2", "", "", "3", "", "1").map(s => text(size: 13pt, fill: rgb("#ef6c00"), s)), [],
+    )
+    #set text(size: 16pt)
+    - *Slice*: one block whose start and length the compiler knows → copied at full memory
+      bandwidth.
+    - *Gather*: the positions are known only at run time, after `idx` is read → every index is
+      a separate lookup.
+  ]
+)
+
+#[
+  #set text(size: 17pt)
+  In a DG solver: the left neighbour of element `e` is `e - 1` on a brick mesh (*slice*), but
+  `left[e]`, read from the mesh, on an unstructured mesh (*gather*).
+]
+
+== Gathers on the TPU: the cost is per index
+
+`X` has one column per block of $M$ numbers (e.g. one face: all variables at its nodes). How many
+numbers one index fetches depends on how the code is written:
+
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 1em,
+  align: top,
+  [
+    #text(size: 13.5pt, weight: "bold")[Raised kernel: one thread per number]
+    #text(size: 17pt)[
+      ```julia
+      i, k = @index(Global, NTuple)
+      Y[i, k] = X[i, idx[k]]   # 1 index → 1 number
+      ```
+    ]
+  ],
+  [
+    #text(size: 13.5pt, weight: "bold")[Array code: one index per column]
+    #text(size: 17pt)[
+      ```julia
+      Y = X[:, idx]            # 1 index → M numbers
+      ```
+    ]
+  ],
+)
+
+E6: 64 MiB of Float32 read through `idx` and written once, GB/s (plain copy: 365):
+
+#table(
+  columns: (2.2fr, auto, auto, auto),
+  [*numbers per index $M$*], [$1$], [$16$], [$256$ (1 KiB)],
+  [TPU v5e, slice (structured neighbour)], [164], [375], [360],
+  [TPU v5e, gather `X[:, idx]`], [1.0], [19], [*234*],
+  [A100, gather `X[:, idx]` (random `idx`)], [130], [577], [671],
+)
+
+#[
+  #set text(size: 16pt)
+  - The TPU looks up ≈ 120 M indices per second (≈ 8 ns each), whatever $M$, random or regular
+    alike: only ≈ 1 KiB per index comes close to a copy.
+  - Raised kernels gather one number per index (E2, E5). The array code gathers one whole face per
+    index (3D Euler, $n = 4$: 80 numbers). Brick meshes need no gather at all.
+  - On an A100 even single-number gathers are fast: the per-index cost is a TPU property.
+]
+
 = E11: Trixi's flux-differencing kernel on the TPU
 
 == E11: what blocked raising
