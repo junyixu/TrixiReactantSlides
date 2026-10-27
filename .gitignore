@@ -1,3 +1,4 @@
 _site/
 *.pdf
 .claude-commands.log
+/abbr.md
