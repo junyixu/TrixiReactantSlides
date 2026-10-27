@@ -41,7 +41,7 @@
   #show table: set text(size: 13pt)
   #table(
     columns: (1.15fr, 2.6fr, auto),
-    [*From the 13 October meeting*], [*What I did and the result, compared with Trixi*],
+    [*From our last meeting*], [*What I did and the result, compared with Trixi*],
     [*Continue?*],
     ..rows,
   )
@@ -52,14 +52,14 @@
   [I wrote `rhs!` as whole-array operations on `P4estMesh` (the *array code*). It calls Trixi's
     physics functions unchanged and agrees with Trixi's `rhs!` to round-off.],
   [#ok yes],
-  [`P4estMesh` in 2D and 3D, Float32, the cases of Trixi's GPU tests],
+  [`P4estMesh` in 2D and 3D, Float32, the test cases from Trixi's GPU tests],
   [Every case of Trixi's GPU tests runs to the end on the TPU within the test tolerances. Mortars
     and AMR work too, although Trixi's GPU path does not have them.],
   [#ok done],
-  [new since the meeting: speed on the TPU],
+  [not discussed last time: speed on the TPU],
   [With 262,144 elements in 3D, the array code on one TPU v5e takes 38.9 ms per weak-form `rhs!`;
     Trixi on an A100 takes 36.0 ms. For flux differencing with hand-written TPU kernels (Pallas),
-    an RK step takes 18.2 ms, against about 33 ms for Trixi.],
+    an RK step takes 18.2 ms, compared with about 33 ms for Trixi.],
   [#ok yes],
   [run one of Trixi's flux-differencing kernels through Reactant],
   [With its node loops unrolled, so that Reactant emits no gathers, Trixi's FullSweepGlobal kernel
@@ -84,7 +84,7 @@
   [get Reactant running first: it will expose low-level problems],
   [3 issues reported to Reactant.jl, fixes for 2 of them as pull requests],
   [#ok keep reporting],
-  [your question: can changed KA kernels reach the same speed without Reactant?],
+  [your question: could rewritten KA kernels be as fast without Reactant?],
   [Unrolling the node loops lets Reactant raise FullSweepGlobal, but on an A100 without Reactant
     it makes the kernel 7–9× slower (26–29 ms instead of 3.3–4.1 ms). One KA kernel for the whole
     RK stage, like the Pallas kernel, is not written yet (#repo-issue(12), analysis in
@@ -321,8 +321,8 @@ $(n, n, n, "elements")$ array per variable. The weak-form volume term, simplifie
 
 #[
   #set text(size: 15.5pt)
-  - The array code computes the same discretization as Trixi, to round-off, also on the TPU, and
-    no Trixi code was changed. Other equations need no new flux code (MHD is an example).
+  - The array code matches Trixi's discretization to round-off, also on the TPU, without any change
+    to Trixi. Other equations need no new flux code (MHD is an example).
     Neighbours come from slices on brick meshes and from one gather of whole faces on other meshes.
   - It is worth continuing as the code for a package extension; it also runs on GPUs.
 ]
@@ -335,7 +335,7 @@ $(n, n, n, "elements")$ array per variable. The weak-form volume term, simplifie
   columns: (1.3fr, 2.4fr, 1fr),
   [*Feature*], [*Prototype: result compared with Trixi*], [*Trixi's GPU path*],
   [Trixi's GPU test cases, 3D and 2D: advection, Euler, MHD],
-  [they run to the end on the TPU within the tests' Float32 tolerances, with as many steps as Trixi],
+  [they run to the end on the TPU within the tests' Float32 tolerances, taking the same number of steps as Trixi],
   [tested],
   [GLM-MHD, non-conservative terms],
   [uses Trixi's functions unchanged; `rhs!` differs by $7.6 times 10^(-14)$ (Float64)],
@@ -457,7 +457,7 @@ v5e 27.6 ms.
 #[
   #set text(size: 14pt)
   - The Pallas kernel nearly matches Trixi's time on a chip with 2.5× less memory bandwidth
-    (819 GB/s against 2 TB/s). It computes all node pairs except the zero diagonal, as FullSweep
+    (819 GB/s vs 2 TB/s). It computes all node pairs except the zero diagonal, as FullSweep
     does; at about 570 GB/s it is bandwidth-bound, so the extra arithmetic costs nothing.
   - Trixi keeps one element per workgroup in shared memory and needs 12 barriers; the Pallas kernel
     keeps 512–1024 elements in VMEM and needs none. The price is TPU-only code, with the two-point
@@ -515,11 +515,11 @@ v5e 27.6 ms.
 
 #[
   #set text(size: 15pt)
-  - An RK step takes 18.2 ms on a v5e, against about 33 ms for Trixi on an A100. One stage takes
+  - An RK step takes 18.2 ms on a v5e, compared with about 33 ms for Trixi on an A100. One stage takes
     3.6 ms, which is about 650 GB/s, 80% of the v5e's peak. The whole run (317 steps) passes the GPU test.
   - Limits: the kernel covers only 3D Euler on brick meshes, and the whole time loop must be one
     compiled program, because each program boundary costs about 5 ms of layout copies.
-  - It is worth continuing if TPU-only code is acceptable; the same fusion on an A100 comes first.
+  - It is worth continuing if TPU-only code is acceptable, but first I want the same fusion on an A100.
 ]
 
 == Unstructured meshes: the gather costs on the TPU
@@ -626,8 +626,8 @@ them:
     [*Direction*], [*Result, compared with Trixi*], [*Continue?*],
     [array code (XLA)],
     [All P4est features tested (curved meshes, mortars, AMR, shock capturing) agree with Trixi to
-      round-off; Trixi's GPU path has no mortars or AMR. On one v5e against Trixi on an A100, the
-      weak form is on par, and flux differencing is 8.6× slower without Pallas.],
+      round-off; Trixi's GPU path has no mortars or AMR. On one v5e, the weak form is as fast as
+      Trixi on an A100, and flux differencing is 8.6× slower without Pallas.],
     [#ok as a package extension],
     [Pallas kernels],
     [For flux differencing, an RK step is 1.8× faster than Trixi on an A100. So far they cover only
@@ -657,9 +657,9 @@ them:
   #set text(size: 18pt)
   - XLA fuses the array operations into kernels.
   - On TPUs, Trixi's thread-style kernels need rewriting anyway: most did not raise (Reactant
-    0.2.291), and the raised flux-differencing kernel takes 47.8 ms, against 2.19 ms for the Pallas
-    kernel. So the array code is the frame, and Pallas kernels speed up the parts that take the
-    most time.
+    0.2.291), and the raised flux-differencing kernel takes 47.8 ms, compared with 2.19 ms for the Pallas
+    kernel. So the array code holds the solver together, and Pallas kernels speed up the slowest
+    parts.
   - On GPUs the array code is 2.8× faster than Trixi's one-thread-per-element kernel for the weak
     form, but 2.3× slower than HalfSweep for flux differencing.
 ]
@@ -692,10 +692,9 @@ them:
   - Is TPU-only kernel code (Pallas) acceptable in a package extension?
   - *Code structure*: Trixi's KA kernels keep one structure (loops over elements) for CPUs,
     including MPI clusters, and GPUs. The array code is a second structure: whole-array operations
-    that XLA fuses (the reasons are on the slide "Why array code"). Is that worth maintaining in
-    Trixi?
+    that XLA fuses (see "Why array code"). Is that worth maintaining in Trixi?
   - *Time integration*: whole simulations already run with my own RK loop (Carpenter–Kennedy
-    2N54, as in Trixi's elixirs, with Trixi's CFL time step) and pass Trixi's GPU tests. Running Trixi's own `solve` (OrdinaryDiffEq) and its callbacks with
-    Reactant is not done yet.
+    2N54, as in Trixi's elixirs, with Trixi's CFL time step) and pass Trixi's GPU tests. I have not
+    yet tried running Trixi's own `solve` (OrdinaryDiffEq) and its callbacks with Reactant.
   - AD: find a potential application (maybe in November).
 ]
