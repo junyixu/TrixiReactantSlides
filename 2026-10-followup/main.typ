@@ -53,8 +53,7 @@
     physics functions unchanged and agrees with Trixi's `rhs!` to round-off.],
   [#ok yes],
   [`P4estMesh` in 2D and 3D, Float32, the test cases from Trixi's GPU tests],
-  [Every case of Trixi's GPU tests runs to the end on the TPU within the test tolerances. Mortars
-    and AMR work too, although Trixi's GPU path does not have them.],
+  [Every case of Trixi's GPU tests runs to the end on the TPU within the test tolerances.],
   [#ok done],
   [not discussed last time: speed on the TPU],
   [With 262,144 elements in 3D, the array code on one TPU v5e takes 38.9 ms per weak-form `rhs!`;
