@@ -671,8 +671,8 @@ them:
   + *The same fusion on an A100*: put Trixi's HalfSweep, the surface terms, the sources and the RK
     update into one CUDA kernel, and compare it with the fused Pallas kernel (#repo-issue(12)). An
     A100 has 2.5× the bandwidth of a v5e, so if the kernel is bandwidth-bound, an RK step should take
-    about 8 ms (v5e: 18.2 ms). A v5e costs €1.37/h, an A100 about \$1.2–1.8/h. This comparison
-    decides whether TPUs pay off.
+    about 8 ms (v5e: 18.2 ms). This comparison decides whether TPUs pay off; #repo-issue(14)
+    estimates the costs.
   + *Package extension*: turn the array code into a Reactant backend for Trixi's P4est solver.
   + *KA 0.10 with Reactant*: check that 4D kernels raise without the workaround (\#844).
   + *More Pallas kernels*: write them for other equations and unstructured meshes, but only if
@@ -690,11 +690,13 @@ them:
 #[
   #set text(size: 16pt)
   - Is TPU-only kernel code (Pallas) acceptable in a package extension?
-  - *Code structure*: Trixi's KA kernels keep one structure (loops over elements) for CPUs,
-    including MPI clusters, and GPUs. The array code is a second structure: whole-array operations
-    that XLA fuses (see "Why array code"). Is that worth maintaining in Trixi?
-  - *Time integration*: whole simulations already run with my own RK loop (Carpenter–Kennedy
-    2N54, as in Trixi's elixirs, with Trixi's CFL time step) and pass Trixi's GPU tests. I have not
-    yet tried running Trixi's own `solve` (OrdinaryDiffEq) and its callbacks with Reactant.
+  - *Package extension*: Trixi mainly runs on CPU clusters with MPI. Its KA kernels keep the
+    per-element loops of the CPU code, so CPUs and GPUs share one structure. The array code changes
+    more: it is a second structure (whole-array operations that XLA fuses, see "Why array code").
+    As a package extension it would probably also have to use Trixi's own `solve` (OrdinaryDiffEq)
+    and callbacks instead of my RK loop, which I have not tried with Reactant yet. Is that worth
+    maintaining in Trixi? Either way, anyone in your group who wants to fuse the kernels on an A100
+    can start from the prototype code now
+    (#link("https://github.com/junyixu/TrixiReactant.jl")[TrixiReactant.jl], #repo-issue(12)).
   - AD: find a potential application (maybe in November).
 ]
