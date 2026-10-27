@@ -41,32 +41,32 @@
     columns: (1.15fr, 2.6fr, auto),
     [*Since 13 October*], [*What I did → result, compared with Trixi*], [*Continue?*],
     [array implementation, first as a separate prototype],
-    [*E12*: `rhs!` as array operations on `P4estMesh`, Trixi's physics functions unchanged; agrees
-      with Trixi's `rhs!` to round-off],
+    [*Array code*: `rhs!` written as whole-array operations on `P4estMesh`, calling Trixi's
+      physics functions unchanged; agrees with Trixi's `rhs!` to round-off],
     [#ok yes],
     [`P4estMesh` 2D and 3D; Float32; Trixi's GPU tests],
-    [*E14–E25*: every GPU test case runs to the end on the TPU within its tolerances; also mortars
-      and AMR, which Trixi's GPU path does not have],
+    [Every case of Trixi's GPU tests runs to the end on the TPU within the test tolerances; also
+      mortars and AMR, which Trixi's GPU path does not have],
     [#ok done],
     [new: speed on the TPU],
     [one v5e vs Trixi on an A100 (3D, 262,144 elements): weak form 38.9 vs 36.0 ms per `rhs!`;
-      flux differencing with Pallas kernels (*E23*, *E26*) 18.2 vs ≈ 33 ms per RK step],
+      flux differencing with hand-written TPU kernels (Pallas) 18.2 vs ≈ 33 ms per RK step],
     [#ok yes],
     [one of Trixi's flux-differencing kernels through Reactant],
-    [*E11*: FullSweepGlobal raises and is correct on the TPU, but takes 47.8 ms; Trixi's HalfSweep
-      on an A100 2.11 ms],
+    [Trixi's FullSweepGlobal kernel with its node loops unrolled (so that Reactant emits no
+      gathers): correct on the TPU, but 47.8 ms; Trixi's HalfSweep on an A100 2.11 ms],
     [#no no],
     [`Symbol` → enum (Trixi PR \#3332)],
-    [*E13*: Trixi's own kernels then raise without my integer workarounds (`Int8`; `UInt8` hits a
-      Reactant bug). The array prototype does not need it],
+    [With the PR, Trixi's own kernels raise without my integer workarounds (`Int8`; `UInt8` hits a
+      Reactant bug). The array code does not need it],
     [#no no],
     [Reactant first: it will expose low-level problems],
     [3 issues reported to Reactant.jl, fixes for 2 of them as pull requests],
     [#ok as found],
     [question: the same speed by changing KA kernels, without Reactant?],
-    [*E17*, A100: E11's changes make the kernel 7–9× slower without Reactant. The array code is
-      2.8× faster than Trixi for the weak form, 2.3× slower for flux differencing],
-    [#warn next steps],
+    [A100, no Reactant: the unrolled loops above make FullSweepGlobal 7–9× slower (26–29 vs
+      3.3–4.1 ms); they only help raising. A fused KA kernel like the Pallas one: not tested yet],
+    [#warn next step 1],
   )
 ]
 
@@ -166,7 +166,7 @@ numbers one index fetches depends on how the code is written:
   ],
 )
 
-E6: 64 MiB of Float32 read through `idx` and written once, GB/s (plain copy: 365):
+Measured: 64 MiB of Float32 read through `idx`, GB/s (plain copy: 365):
 
 #table(
   columns: (2.2fr, auto, auto, auto),
@@ -180,7 +180,7 @@ E6: 64 MiB of Float32 read through `idx` and written once, GB/s (plain copy: 365
   #set text(size: 16pt)
   - The TPU looks up ≈ 120 M indices per second (≈ 8 ns each), whatever $M$, random or regular
     alike: only ≈ 1 KiB per index comes close to a copy.
-  - Raised kernels gather one number per index (E2, E5). The array code gathers one whole face per
+  - Raised kernels gather one number per index. The array code gathers one whole face per
     index (3D Euler, $n = 4$: 80 numbers). Brick meshes need no gather at all.
   - On an A100 even single-number gathers are fast: the per-index cost is a TPU property.
 ]
@@ -188,7 +188,7 @@ E6: 64 MiB of Float32 read through `idx` and written once, GB/s (plain copy: 365
 
 = Trixi's own kernel through Reactant
 
-== E11: Trixi's flux-differencing kernel on the TPU
+== Trixi's flux-differencing kernel on the TPU
 
 Trixi's `FullSweepGlobal` (3D, one thread per node) raised by Reactant; the node loops (simplified):
 
@@ -212,7 +212,7 @@ Trixi's `FullSweepGlobal` (3D, one thread per node) raised by Reactant; the node
       244 gathers.]
   ],
   [
-    #text(size: 13.5pt, weight: "bold")[E11: loop unrolled ($n$ known when compiling)]
+    #text(size: 13.5pt, weight: "bold")[Changed: loop unrolled ($n$ known when compiling)]
     #text(size: 12.5pt)[
       ```julia
       du = unrolled_sum(Val(n)) do ii
@@ -230,9 +230,9 @@ Trixi's `FullSweepGlobal` (3D, one thread per node) raised by Reactant; the node
 #table(
   columns: (2.2fr, auto),
   [*Flux-differencing volume term, 262,144 elements, Float32*], [*time*],
-  [TPU v5e, Trixi's kernel unrolled and raised (E11)], [47.8 ms],
-  [A100, Trixi's HalfSweep, CUDA (E17)], [*2.11 ms*],
-  [TPU v5e, Pallas kernel (E23, below)], [2.19 ms],
+  [TPU v5e, Trixi's kernel unrolled and raised], [47.8 ms],
+  [A100, Trixi's HalfSweep, CUDA], [*2.11 ms*],
+  [TPU v5e, Pallas kernel (below)], [2.19 ms],
 )
 
 #[
@@ -246,7 +246,7 @@ Trixi's `FullSweepGlobal` (3D, one thread per node) raised by Reactant; the node
 
 = Array prototype
 
-== E12: Trixi's functions applied to whole arrays
+== Array code: Trixi's functions applied to whole arrays
 
 Any conforming 3D or 2D `P4estMesh` set up by Trixi; one $(n, n, n, "elements")$ array per variable.
 Weak-form volume term (simplified):
@@ -274,7 +274,7 @@ Weak-form volume term (simplified):
     ]
   ],
   [
-    #text(size: 13.5pt, weight: "bold")[Prototype (`e12_p4est_array.jl`): whole arrays]
+    #text(size: 13.5pt, weight: "bold")[Array code: whole arrays]
     #text(size: 11pt)[
       ```julia
       # U: 5 arrays (n, n, n, elements)
@@ -300,9 +300,9 @@ Weak-form volume term (simplified):
 #[
   #set text(size: 15.5pt)
   - The same discretization as Trixi, to round-off, also on the TPU; no Trixi code changed. Other
-    equations need no new flux code (MHD, E15). Neighbours: slices on brick meshes, one gather of
+    equations need no new flux code (MHD). Neighbours: slices on brick meshes, one gather of
     whole faces on any other mesh.
-  - Worth continuing: this is the code for a package extension; it runs on GPUs too (E17).
+  - Worth continuing: this is the code for a package extension; it runs on GPUs too (next section).
 ]
 
 == What the prototype covers, compared with Trixi
@@ -311,23 +311,22 @@ Weak-form volume term (simplified):
   columns: (1.3fr, 2.4fr, 1fr),
   [*Feature*], [*Prototype: result vs Trixi*], [*Trixi's GPU path*],
   [Trixi's GPU test cases, 3D and 2D: advection, Euler, MHD],
-  [run to the end on the TPU within the tests' Float32 tolerances, same number of steps (E14, E16)],
+  [run to the end on the TPU within the tests' Float32 tolerances, same number of steps],
   [tested],
   [GLM-MHD, non-conservative terms],
-  [Trixi's functions unchanged; `rhs!` $7.6 times 10^(-14)$ (Float64, E15)],
+  [Trixi's functions unchanged; `rhs!` $7.6 times 10^(-14)$ (Float64)],
   [tested],
   [curved unstructured meshes],
-  [`rhs!` ≤ $9 times 10^(-13)$ in 3D and 2D (E12, E25)],
+  [`rhs!` ≤ $9 times 10^(-13)$ in 3D and 2D],
   [not tested],
   [mortars (non-conforming meshes)],
-  [`rhs!` ≤ $2.6 times 10^(-12)$ with 298 mortars (E18, E25)],
+  [`rhs!` ≤ $2.6 times 10^(-12)$ with 298 mortars],
   [not implemented],
   [AMR],
-  [Trixi's `AMRCallback`; the same meshes as Trixi; 15–40 adaptations with 1–2 compilations
-    (E21, E25)],
+  [Trixi's `AMRCallback`; the same meshes as Trixi; 15–40 adaptations with 1–2 compilations],
   [not implemented (needs mortars)],
   [shock capturing],
-  [`rhs!` $2.4 times 10^(-16)$; 10–13% more time than flux differencing (E22)],
+  [`rhs!` $2.4 times 10^(-16)$; 10–13% more time than flux differencing],
   [not tested],
 )
 
@@ -350,10 +349,10 @@ Weak-form volume term (simplified):
   columns: (2.3fr, auto, auto, auto),
   [], [*weak form `rhs!`*], [*flux diff. `rhs!`*], [*flux diff. RK step*],
   [A100, Trixi's CUDA kernels], [36.0 ms], [6.5 ms], [≈ 33 ms#super[a]],
-  [A100, array code (Reactant → CUDA, E17)], [*12.9 ms*], [14.7 ms], [99 ms],
-  [v5e, array code (XLA, E12, E14)], [38.9 ms], [55.7 ms], [283 ms],
-  [v5e, + Pallas volume kernel (E23)], [—], [32.3 ms], [164 ms],
-  [v5e, one Pallas kernel per RK stage (E26)], [—], [3.1 ms#super[b]], [*18.2 ms*],
+  [A100, array code (Reactant → CUDA)], [*12.9 ms*], [14.7 ms], [99 ms],
+  [v5e, array code (XLA)], [38.9 ms], [55.7 ms], [283 ms],
+  [v5e, + Pallas volume kernel], [—], [32.3 ms], [164 ms],
+  [v5e, one Pallas kernel per RK stage], [—], [3.1 ms#super[b]], [*18.2 ms*],
 )
 
 #[
@@ -369,10 +368,10 @@ Weak-form volume term (simplified):
 
 #small[
   #super[a] 5 × `rhs!`, without the RK update. #super[b] Kernel alone. RK step: one compiled
-  program per stage (E14); E26: one program for the whole time loop.
+  program per stage; last row: one program for the whole time loop.
 ]
 
-== E23: Pallas volume kernel vs Trixi's HalfSweep
+== Pallas volume kernel vs Trixi's HalfSweep
 
 Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*, XLA (v5e) 27.6 ms.
 
@@ -402,7 +401,7 @@ Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*,
     ]
   ],
   [
-    #text(size: 13.5pt, weight: "bold")[Pallas `kernel_slab` (`e23_pallas_fd.py`): $B$ elements / block]
+    #text(size: 13.5pt, weight: "bold")[Pallas `kernel_slab` (JAX): $B$ elements / block]
     #text(size: 10.5pt)[
       ```python
       # DMA block (c, N, N, N, B) from HBM -> VMEM; D_split in SMEM
@@ -436,7 +435,7 @@ Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*,
     VMEM, no barriers. Price: TPU-only code, the two-point flux written again in JAX.
 ]
 
-== E26: the whole RK stage in one Pallas kernel
+== The whole RK stage in one Pallas kernel
 
 #grid(
   columns: (1fr, 1.1fr),
@@ -461,12 +460,12 @@ Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*,
     ]
   ],
   [
-    #text(size: 13.5pt, weight: "bold")[E26 (`e26_pallas_fused.py`): a block of elements in VMEM]
+    #text(size: 13.5pt, weight: "bold")[One Pallas kernel: a block of elements in VMEM]
     #text(size: 10.5pt)[
       ```python
       def kernel(ds_ref, t_ref, *refs):
           u = [r[...] for r in u_r]              # read once
-          volume_into(o_r, ds_ref, prim(u), ja)  # as in E23
+          volume_into(o_r, ds_ref, prim(u), ja)  # previous slide
           for d in range(3):
               for side in (0, 1):                # 6 faces
                   own = [layer(q, d, li) for q in u]
@@ -527,7 +526,7 @@ Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*,
   [v5e, 3D brick, 262,144 elements], [slices], [38.9 ms], [2.3 ns],
   [v5e, 3D curved unstructured, 13,056 elements], [gather], [17.3 ms], [11 ns],
   [v5e, 2D curved unstructured, 1.6 M elements], [gather], [389 ms], [15 ns],
-  [A100, 3D, 262,144 elements (E17)], [slices / gather], [12.9 / 14.8 ms], [0.8 / 0.9 ns],
+  [A100, 3D, 262,144 elements], [slices / gather], [12.9 / 14.8 ms], [0.8 / 0.9 ns],
 )
 
 #[
@@ -551,22 +550,22 @@ them:
 
 #table(
   columns: (auto, 1fr, auto, auto),
-  [*Issue*], [*Problem*], [*Found in*], [*Fix*],
+  [*Issue*], [*Problem*], [*Found with*], [*Fix*],
   reactant("issues", 3538),
   [`dot` / `norm` / `map` on static vectors (`SVector`) of traced numbers go to the XLA-array
     versions and fail],
-  [E12, E25], [PR #reactant("pull", 3541)],
+  [Trixi's fluxes (`dot`, `norm`)], [PR #reactant("pull", 3541)],
   reactant("issues", 3539),
   [arithmetic on traced `Bool`s (`true - false`) does not compile],
-  [E25], [PR #reactant("pull", 3540)],
+  [Trixi's 2D advection test], [PR #reactant("pull", 3540)],
   reactant("issues", 3553),
   [printing a method signature with an `SVector` type parameter fails during tracing],
-  [E12], [—],
+  [advection velocity as a type parameter], [—],
 )
 
 #[
   #set text(size: 17pt)
-  - *KernelAbstractions*: the bounds check of a 4D index range cannot be raised (E11); worked
+  - *KernelAbstractions*: the bounds check of a 4D index range cannot be raised (Trixi's 3D kernels); worked
     around with `@kernel unsafe_indices = true`. Probably fixed in KA 0.10 by
     #link("https://github.com/JuliaGPU/KernelAbstractions.jl/pull/844")[\#844] (V. Churavy,
     10 Oct): KA 0.9 checks the bounds with `all(...)`, compiled into a loop over a stack array that
@@ -594,7 +593,7 @@ them:
     [flux differencing: RK step 1.8× faster than Trixi on an A100; so far 3D Euler on brick
       meshes, TPU-only code],
     [#ok after the A100 comparison],
-    [Trixi's own kernels through Reactant (E11, E13)],
+    [Trixi's own kernels through Reactant],
     [correct, but 23× slower than Trixi on an A100],
     [#no],
     [unstructured meshes on TPUs],
@@ -615,7 +614,7 @@ them:
 #[
   #set text(size: 16.5pt)
   + *The same fusion on an A100*: Trixi's HalfSweep plus surface terms, sources and the RK update
-    in one CUDA kernel, compared with E26. An A100 has 2.5× the bandwidth of a v5e; if
+    in one CUDA kernel, compared with the fused Pallas kernel. An A100 has 2.5× the bandwidth of a v5e; if
     bandwidth-bound, ≈ 8 ms per RK step (v5e: 18.2 ms). Prices: v5e €1.37/h, A100 ≈ \$1.2–1.8/h.
     This decides whether TPUs pay off.
   + *Package extension*: the array code as a Reactant backend for Trixi's P4est solver.
