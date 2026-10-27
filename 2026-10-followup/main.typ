@@ -571,7 +571,11 @@ them:
 #[
   #set text(size: 17pt)
   - *KernelAbstractions*: the bounds check of a 4D index range cannot be raised (E11); worked
-    around with `@kernel unsafe_indices = true`.
+    around with `@kernel unsafe_indices = true`. Probably fixed in KA 0.10 by
+    #link("https://github.com/JuliaGPU/KernelAbstractions.jl/pull/844")[\#844] (V. Churavy,
+    10 Oct): KA 0.9 checks the bounds with `all(...)`, compiled into a loop over a stack array that
+    Reactant cannot raise; \#844 uses a branch-free `reduce(&, ...)`. Not tested yet: Reactant and
+    Trixi still require KA 0.9.
 ]
 
 #small[The prototype works around all of these; none requires changing Trixi.]
@@ -622,6 +626,7 @@ them:
     bandwidth-bound, ≈ 8 ms per RK step (v5e: 18.2 ms). Prices: v5e €1.37/h, A100 ≈ \$1.2–1.8/h.
     This decides whether TPUs pay off.
   + *Package extension*: the array code as a Reactant backend for Trixi's P4est solver.
+  + *KA 0.10 with Reactant*: check that 4D kernels raise without the workaround (\#844).
   + *More Pallas kernels* (other equations, unstructured meshes): only if step 1 favours TPUs.
   + *AD*: not started (via Trixi Slack, as discussed).
 ]
