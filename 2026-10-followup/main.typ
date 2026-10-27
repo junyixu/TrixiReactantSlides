@@ -8,7 +8,7 @@
     title: [Trixi.jl on TPUs via Reactant.jl],
     subtitle: [Follow-up: P4est array prototype — kernel raising, coverage, speed],
     author: [Junyi Xu],
-    date: datetime(year: 2026, month: 10, day: 18),
+    date: datetime(year: 2026, month: 10, day: 23),
     institution: [Summer research],
   ),
 )
