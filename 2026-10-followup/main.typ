@@ -610,14 +610,20 @@ Three issues with minimal examples (Reactant 0.2.297); pull requests fix two of 
 ]
 
 #[
-  #set text(size: 16pt)
+  #set text(size: 15pt)
   *My reading*: Trixi's P4est solver can run on TPUs with the features tested (curved meshes,
   mortars, AMR, shock capturing). Per chip, XLA alone matches
   Trixi's GPU kernels for the weak form; flux differencing passes them only with hand-written
   kernels, which are TPU-only.
+
+  *Why array code*: XLA fuses it. On TPUs, Trixi's thread-style kernels need rewriting anyway: most
+  did not raise (Reactant 0.2.291), and the flux-differencing one, raised, takes 47.8 ms (Pallas:
+  2.19 ms). So the array code is the frame and Pallas speeds up the hot parts. On GPUs it beats
+  Trixi's one-thread-per-element kernel (weak form, 2.8×), but not HalfSweep (flux differencing,
+  2.3× slower).
 ]
 
-== Next steps and open questions
+== Next steps
 
 #[
   #set text(size: 15pt)
@@ -636,10 +642,13 @@ Three issues with minimal examples (Reactant 0.2.297); pull requests fix two of 
     read the same data).
 ]
 
-*Open questions*
+== Open questions
 
 #[
-  #set text(size: 15pt)
+  #set text(size: 16pt)
   - Is TPU-only kernel code (Pallas) acceptable in a package extension?
+  - *Code structure*: Trixi's KA kernels keep one structure (loops over elements) for CPUs,
+    including MPI clusters, and GPUs. The array code is a second structure: whole-array operations
+    that XLA fuses (reasons on the assessment slide). Is that worth maintaining in Trixi?
   - AD: find a potential application (maybe in November).
 ]
