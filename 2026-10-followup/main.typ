@@ -661,6 +661,9 @@ them:
     parts.
   - On GPUs the array code is 2.8× faster than Trixi's one-thread-per-element kernel for the weak
     form, but 2.3× slower than HalfSweep for flux differencing.
+  - The array code reads more like JAX than like Trixi's loops, but only the DG operator (volume,
+    surfaces, mortars, boundaries) is written this way: Trixi's physics functions are shared
+    unchanged, and the rules of tracing (e.g. no `if` on traced values) are handled in a few patches.
 ]
 
 == Next steps
