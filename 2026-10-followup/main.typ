@@ -67,9 +67,6 @@
     [*E17*, A100: E11's changes make the kernel 7–9× slower without Reactant. The array code is
       2.8× faster than Trixi for the weak form, 2.3× slower for flux differencing],
     [#warn next steps],
-    [new: several TPU chips],
-    [*E24*: 4 chips 4× faster, bitwise identical results],
-    [#warn quota],
   )
 ]
 
@@ -357,7 +354,6 @@ Weak-form volume term (simplified):
   [v5e, array code (XLA, E12, E14)], [38.9 ms], [55.7 ms], [283 ms],
   [v5e, + Pallas volume kernel (E23)], [—], [32.3 ms], [164 ms],
   [v5e, one Pallas kernel per RK stage (E26)], [—], [3.1 ms#super[b]], [*18.2 ms*],
-  [4 × v5e, array code (E24)], [9.7 ms], [14.1 ms], [—],
 )
 
 #[
@@ -604,9 +600,6 @@ them:
     [unstructured meshes on TPUs],
     [5–14× slower per node than brick meshes; on an A100 the gather costs 15%],
     [#warn only if needed],
-    [several chips (E24)],
-    [linear up to 4 chips],
-    [#warn needs quota],
   )
 ]
 
@@ -628,6 +621,8 @@ them:
   + *Package extension*: the array code as a Reactant backend for Trixi's P4est solver.
   + *KA 0.10 with Reactant*: check that 4D kernels raise without the workaround (\#844).
   + *More Pallas kernels* (other equations, unstructured meshes): only if step 1 favours TPUs.
+  + *Several TPU chips*: Reactant can split the arrays along the element dimension without code
+    changes, so I expect near-linear scaling; needs more TPU quota.
   + *AD*: not started (via Trixi Slack, as discussed).
 ]
 
@@ -636,7 +631,6 @@ them:
 #[
   #set text(size: 16.5pt)
   - Is TPU-only kernel code (Pallas) acceptable in a package extension?
-  - Are more chips worth a quota request?
   - AD: you mentioned Valentin Churavy's AD pull requests for Trixi. Are they Enzyme.jl on Trixi's
     native path? (My guess, not checked — I would ask him on Trixi Slack.)
 ]
