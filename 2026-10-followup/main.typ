@@ -698,5 +698,5 @@ them:
     my own RK loop (Carpenter–Kennedy 2N54, as in Trixi's elixirs, with Trixi's CFL time step) and
     pass Trixi's GPU tests. Running Trixi's own `solve` (OrdinaryDiffEq) and its callbacks with
     Reactant is not done yet.
-  - *AD*: which application could use derivatives? I could look for one in November.
+  - AD: find a potential application (maybe in November).
 ]
