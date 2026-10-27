@@ -679,10 +679,10 @@ them:
     step 1 favours TPUs.
   + *Several TPU chips*: Reactant can split the arrays along the element dimension without code
     changes, so I expect near-linear scaling; this needs more TPU quota.
-  + *AD*: not started. Reactant's claimed advantage, which I have not verified yet, is that Enzyme
-    differentiates the whole traced tensor program (StableHLO) and XLA then optimizes the derivative
-    like any other program. With KA, Enzyme differentiates each kernel separately in LLVM IR, with a
-    tape per thread and atomic adds where threads read the same data.
+  + *AD*: not started. Reactant's claimed advantage (not verified yet): Enzyme differentiates the whole traced tensor
+    program (StableHLO), and XLA optimizes the derivative like any other program.
+    With KA, Enzyme differentiates each kernel separately in LLVM IR (a tape per thread, atomic adds where threads
+    read the same data).
 ]
 
 == Open questions
@@ -694,9 +694,8 @@ them:
     including MPI clusters, and GPUs. The array code is a second structure: whole-array operations
     that XLA fuses (the reasons are on the slide "Why array code"). Is that worth maintaining in
     Trixi?
-  - *Time integration*: what did you mean by it on 13 October? Whole simulations already run with
-    my own RK loop (Carpenter–Kennedy 2N54, as in Trixi's elixirs, with Trixi's CFL time step) and
-    pass Trixi's GPU tests. Running Trixi's own `solve` (OrdinaryDiffEq) and its callbacks with
+  - *Time integration*: whole simulations already run with my own RK loop (Carpenter–Kennedy
+    2N54, as in Trixi's elixirs, with Trixi's CFL time step) and pass Trixi's GPU tests. Running Trixi's own `solve` (OrdinaryDiffEq) and its callbacks with
     Reactant is not done yet.
   - AD: find a potential application (maybe in November).
 ]
