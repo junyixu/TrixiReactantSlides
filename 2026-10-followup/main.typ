@@ -547,8 +547,7 @@ Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*,
 
 #let reactant(kind, n) = link("https://github.com/EnzymeAD/Reactant.jl/" + kind + "/" + str(n))[\##n]
 
-Three issues, each with a minimal example (Reactant 0.2.297), and pull requests that fix two of
-them:
+Three issues with minimal examples (Reactant 0.2.297); pull requests fix two of them:
 
 #table(
   columns: (auto, 1fr, auto, auto),
@@ -566,16 +565,18 @@ them:
 )
 
 #[
-  #set text(size: 17pt)
-  - *KernelAbstractions*: the bounds check of a 4D index range cannot be raised (Trixi's 3D kernels); worked
-    around with `@kernel unsafe_indices = true`. Probably fixed in KA 0.10 by
-    #link("https://github.com/JuliaGPU/KernelAbstractions.jl/pull/844")[\#844] (V. Churavy,
-    10 Oct): KA 0.9 checks the bounds with `all(...)`, compiled into a loop over a stack array that
-    Reactant cannot raise; \#844 uses a branch-free `reduce(&, ...)`. Not tested yet: Reactant and
-    Trixi still require KA 0.9.
+  #set text(size: 15pt)
+  - *KernelAbstractions*: the bounds check of a 4D index range (only in Trixi's `FullSweepGlobal`)
+    cannot be raised; worked around by adding an unrolled `in` method. Probably fixed in KA 0.10 by
+    #link("https://github.com/JuliaGPU/KernelAbstractions.jl/pull/844")[\#844] (V. Churavy, 10 Oct:
+    branch-free `reduce(&, ...)`); not tested, as Reactant and Trixi still require KA 0.9.
+  - *Not reported yet*: most problems of Trixi's own kernels through Reactant (the issues above
+    come from the array code): type-valued kernel arguments, NaNs from the raised 2D interface
+    kernel, code that does not raise (loops, local arrays, `sinpi`, barriers); still in 0.2.297,
+    with minimal examples: `UInt8` → float, `reshape` inside a kernel.
 ]
 
-#small[The prototype works around all of these; none requires changing Trixi.]
+#small[The reported issues and the KA bounds check have workarounds that do not change Trixi.]
 
 
 = Summary and next steps
