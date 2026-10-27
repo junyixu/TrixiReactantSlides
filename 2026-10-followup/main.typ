@@ -359,9 +359,10 @@ Weak-form volume term (simplified):
   #set text(size: 15.5pt)
   - *Weak form*: one v5e with XLA ≈ Trixi on an A100. On the A100 the same array code is 2.8× faster
     than Trixi, whose weak-form volume kernel runs one thread per element (78–85% of its `rhs!`).
-  - *Flux differencing*: XLA is 8.6× slower than Trixi; it moves ≈ 10× the necessary data. Pallas
-    kernels move only the necessary data: one kernel per RK stage is 1.8× faster per step than
-    Trixi on an A100.
+  - *Flux differencing*: XLA is 8.6× slower than Trixi: each `rhs!` reads and writes ≈ 80–110
+    state-sized arrays where ≈ 2.5 would do (hundreds of unfused small kernels, 150–190
+    transposes). Pallas kernels move only the necessary data: one kernel per RK stage is 1.8×
+    faster per step than Trixi on an A100.
   - Worth continuing: Pallas, yes — but Trixi's GPU kernels are not fused this way; the fair
     comparison is the same fusion on an A100 (next steps).
 ]
@@ -512,7 +513,8 @@ Volume term, 262,144 elements: HalfSweep (A100) 2.11 ms, Pallas (v5e) *2.19 ms*,
     #text(size: 13.5pt, weight: "bold")[Any mesh: one gather of whole faces]
     #text(size: 12pt)[
       ```julia
-      # 3D: faces (n, n, 5, 6E), p.src from the mesh
+      # 3D: faces (n, n, 5, 6E)
+      # p.src[s]: the face whose values face s needs
       G = reshape(faces, n * n * 5, :)[:, p.src]
       # then one of 8 orientations per face
       ```
@@ -586,8 +588,9 @@ them:
     columns: (1.25fr, 2.6fr, 1.05fr),
     [*Direction*], [*Result, compared with Trixi*], [*Continue?*],
     [array code (XLA)],
-    [Trixi's P4est feature set to round-off, including mortars and AMR (not in Trixi's GPU path).
-      One v5e vs Trixi on an A100: weak form on par, flux differencing 8.6× slower],
+    [the P4est features tested (curved meshes, mortars, AMR, shock capturing) agree with Trixi to
+      round-off; Trixi's GPU path has no mortars or AMR. One v5e vs Trixi on an A100: weak form on
+      par, flux differencing 8.6× slower without Pallas],
     [#ok as a package extension],
     [Pallas kernels],
     [flux differencing: RK step 1.8× faster than Trixi on an A100; so far 3D Euler on brick
@@ -604,7 +607,8 @@ them:
 
 #[
   #set text(size: 16pt)
-  *My reading*: Trixi can run on TPUs with its full P4est feature set. Per chip, XLA alone matches
+  *My reading*: Trixi's P4est solver can run on TPUs with the features tested (curved meshes,
+  mortars, AMR, shock capturing). Per chip, XLA alone matches
   Trixi's GPU kernels for the weak form; flux differencing passes them only with hand-written
   kernels, which are TPU-only.
 ]
